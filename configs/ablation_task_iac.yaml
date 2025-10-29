@@ -1,0 +1,71 @@
+dataset_name: 'argument'
+
+main_task_names:
+  - 'Propaganda'
+  - 'IAC'
+  - 'WA'
+
+task_sizes:
+  - 18
+  - 8
+  - 1
+
+pooled_task_name: 'Propaganda'
+
+targets_file: './input/targets_iac.json'
+
+select_columns:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 12
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 28
+  - 29
+  - 30
+  - 31
+  - 32
+  - 33
+  - 34
+  - 35
+  - 37
+
+data_path: './data/IAC_data/no_prop_overlap'
+
+sample_size_ratio: 1.0
+
+encoder:
+  encoder_type: 'BERT'
+  encoder_model_name: 'small_bert/bert_en_uncased_L-2_H-128_A-2'
+
+ablate:
+  - 'task'
+
+training_params:
+  epochs: 10
+  init_lr: .0003
+  wt_decay_rate: 0.01
+  warmup_pct: 5
+  dropout: 0.4
+  batch_size: 256
+  workers: 1
+  seq_length: 512
+
+testing_params:
+  batch_size: 256
+  workers: 1
+  seq_length: 512

@@ -1,0 +1,8 @@
+tensorflow-text
+tf-models-official
+tensorflow
+numpy
+pandas
+tensorflow-hub
+scikit-learn
+pyyaml
