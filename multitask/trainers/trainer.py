@@ -9,7 +9,10 @@ import numpy as np
 import tensorflow as tf
 from typing import Optional, Dict, List, Tuple, Any, Callable, Union
 from official.nlp import optimization
-from sklearn.metrics import roc_curve, f1_score
+from sklearn.metrics import (
+    roc_curve, f1_score, precision_score, recall_score, 
+    roc_auc_score, average_precision_score, accuracy_score
+)
 
 from multitask.config import TrainingConfig
 from multitask.models.hierarchical import MultiTaskModel
@@ -364,3 +367,207 @@ class Trainer:
                 return self.history, self.optimal_thresholds
             
         return self.history
+    
+    def evaluate(
+        self,
+        dataset: tf.data.Dataset,
+        thresholds: Optional[List[float]] = None,
+        metrics: Optional[List[str]] = None,
+        mask_value: int = -1
+    ) -> Dict[str, Any]:
+        """Evaluate the model on a dataset.
+        
+        Computes specified metrics on the provided dataset. Can use stored thresholds
+        from training (if optimize_thresholds=True was used in fit()), custom thresholds,
+        or compute probability-based metrics only.
+        
+        Threshold Usage:
+            - If thresholds is None and self.optimal_thresholds exists: uses stored thresholds
+            - If thresholds is provided: uses those thresholds
+            - If neither: only computes probability-based metrics (AUC, AP)
+        
+        Args:
+            dataset: TensorFlow Dataset to evaluate on
+            thresholds: Optional list of thresholds per task (length = num_tasks)
+                       If None, will use self.optimal_thresholds if available
+            metrics: List of metric names to compute. Options:
+                     Binary metrics (require thresholds): 'accuracy', 'precision', 'recall', 'f1'
+                     Probability metrics (no threshold): 'auc', 'average_precision'
+                     If None, computes all applicable metrics based on threshold availability
+            mask_value: Value indicating missing labels to mask out
+            
+        Returns:
+            Dictionary containing:
+                - 'probabilities': Array of predicted probabilities [n_samples, n_tasks]
+                - 'predictions': Array of binary predictions [n_samples, n_tasks] (if thresholds provided)
+                - 'task_metrics': Per-task metrics dict {task_name: {metric: value}}
+                - 'overall_metrics': Overall metrics dict {metric: average_value}
+                - 'thresholds_used': List of thresholds used (if applicable)
+                
+        Example:
+            >>> # After training with optimize_thresholds=True
+            >>> results = trainer.evaluate(test_dataset)  # Uses stored thresholds
+            >>> 
+            >>> # With custom thresholds
+            >>> results = trainer.evaluate(test_dataset, thresholds=[0.5]*10)
+            >>> 
+            >>> # Probability-based metrics only
+            >>> results = trainer.evaluate(test_dataset, metrics=['auc', 'average_precision'])
+        """
+        # Get predictions
+        print("Generating predictions...")
+        y_pred = self.model.predict(dataset, verbose=0)
+        
+        # Extract true labels
+        y_true = []
+        for _, labels in dataset:
+            y_true.append(labels.numpy())
+        y_true = np.concatenate(y_true, axis=0)
+        
+        num_tasks = y_true.shape[1]
+        
+        # Determine which thresholds to use
+        use_thresholds = thresholds if thresholds is not None else self.optimal_thresholds
+        
+        # Determine which metrics to compute
+        if metrics is None:
+            if use_thresholds is not None:
+                # Can compute all metrics
+                metrics = ['accuracy', 'precision', 'recall', 'f1', 'auc', 'average_precision']
+            else:
+                # Only probability-based metrics
+                metrics = ['auc', 'average_precision']
+        
+        # Validate metrics
+        binary_metrics = {'accuracy', 'precision', 'recall', 'f1'}
+        prob_metrics = {'auc', 'average_precision'}
+        valid_metrics = binary_metrics | prob_metrics
+        
+        for metric in metrics:
+            if metric not in valid_metrics:
+                raise ValueError(f"Unknown metric: {metric}. Valid options: {valid_metrics}")
+            if metric in binary_metrics and use_thresholds is None:
+                raise ValueError(
+                    f"Metric '{metric}' requires thresholds. Either provide thresholds parameter "
+                    f"or train with optimize_thresholds=True."
+                )
+        
+        # Validate threshold length
+        if use_thresholds is not None and len(use_thresholds) != num_tasks:
+            raise ValueError(
+                f"Number of thresholds ({len(use_thresholds)}) must match "
+                f"number of tasks ({num_tasks})"
+            )
+        
+        # Apply thresholds if available
+        y_pred_binary = None
+        if use_thresholds is not None:
+            y_pred_binary = np.zeros_like(y_pred)
+            for task_idx in range(num_tasks):
+                y_pred_binary[:, task_idx] = (y_pred[:, task_idx] > use_thresholds[task_idx]).astype(int)
+        
+        # Get task names if available
+        task_names = None
+        if self.model.task_names is not None:
+            task_names = self.model.task_names
+        else:
+            task_names = [f'task_{i}' for i in range(num_tasks)]
+        
+        # Compute metrics per task
+        task_metrics = {}
+        overall_metrics = {metric: [] for metric in metrics}
+        
+        for task_idx in range(num_tasks):
+            task_name = task_names[task_idx]
+            y_task_true = y_true[:, task_idx]
+            y_task_pred_probs = y_pred[:, task_idx]
+            
+            # Filter out masked values
+            valid_mask = y_task_true != mask_value
+            y_task_true_valid = y_task_true[valid_mask]
+            y_task_pred_probs_valid = y_task_pred_probs[valid_mask]
+            
+            if len(y_task_true_valid) == 0:
+                # No valid samples for this task
+                task_metrics[task_name] = {metric: None for metric in metrics}
+                continue
+            
+            task_results = {}
+            
+            # Compute binary metrics if thresholds available
+            if use_thresholds is not None:
+                y_task_pred_binary = y_pred_binary[:, task_idx][valid_mask]
+                
+                if 'accuracy' in metrics:
+                    acc = accuracy_score(y_task_true_valid, y_task_pred_binary)
+                    task_results['accuracy'] = float(acc)
+                    overall_metrics['accuracy'].append(acc)
+                
+                if 'precision' in metrics:
+                    prec = precision_score(y_task_true_valid, y_task_pred_binary, zero_division=0)
+                    task_results['precision'] = float(prec)
+                    overall_metrics['precision'].append(prec)
+                
+                if 'recall' in metrics:
+                    rec = recall_score(y_task_true_valid, y_task_pred_binary, zero_division=0)
+                    task_results['recall'] = float(rec)
+                    overall_metrics['recall'].append(rec)
+                
+                if 'f1' in metrics:
+                    f1 = f1_score(y_task_true_valid, y_task_pred_binary, zero_division=0)
+                    task_results['f1'] = float(f1)
+                    overall_metrics['f1'].append(f1)
+            
+            # Compute probability-based metrics
+            if 'auc' in metrics:
+                try:
+                    auc = roc_auc_score(y_task_true_valid, y_task_pred_probs_valid)
+                    task_results['auc'] = float(auc)
+                    overall_metrics['auc'].append(auc)
+                except ValueError:
+                    # Only one class present
+                    task_results['auc'] = None
+            
+            if 'average_precision' in metrics:
+                try:
+                    ap = average_precision_score(y_task_true_valid, y_task_pred_probs_valid)
+                    task_results['average_precision'] = float(ap)
+                    overall_metrics['average_precision'].append(ap)
+                except ValueError:
+                    # Only one class present
+                    task_results['average_precision'] = None
+            
+            task_metrics[task_name] = task_results
+        
+        # Average overall metrics
+        for metric in overall_metrics:
+            valid_scores = [s for s in overall_metrics[metric] if s is not None]
+            if valid_scores:
+                overall_metrics[metric] = float(np.mean(valid_scores))
+            else:
+                overall_metrics[metric] = None
+        
+        # Build results dictionary
+        results = {
+            'probabilities': y_pred,
+            'task_metrics': task_metrics,
+            'overall_metrics': overall_metrics
+        }
+        
+        if y_pred_binary is not None:
+            results['predictions'] = y_pred_binary
+            results['thresholds_used'] = use_thresholds
+        
+        # Print summary
+        print("\n" + "=" * 60)
+        print("Evaluation Results")
+        print("=" * 60)
+        for metric, value in overall_metrics.items():
+            if value is not None:
+                print(f"{metric.upper():20s}: {value:.4f}")
+            else:
+                print(f"{metric.upper():20s}: N/A")
+        print("=" * 60 + "\n")
+        
+        return results
+
