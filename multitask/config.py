@@ -111,6 +111,11 @@ class ModelConfig:
     # Options: 'concat', 'max', 'mean', 'sum', None (no pooling)
     pooling_strategy: Optional[str] = None
     
+    # Optional task names for model outputs
+    # If provided, must be a flat list with length equal to total_outputs
+    # These correspond to the final level outputs in order
+    task_names: Optional[List[str]] = None
+    
     def __post_init__(self):
         """Validate configuration after initialization."""
         # Validate task structure
@@ -162,6 +167,14 @@ class ModelConfig:
         valid_pooling = {'concat', 'max', 'mean', 'sum', None}
         if self.pooling_strategy not in valid_pooling:
             raise ValueError(f"pooling_strategy must be one of {valid_pooling}")
+        
+        # Validate task_names if provided
+        if self.task_names is not None:
+            if len(self.task_names) != self.total_outputs:
+                raise ValueError(
+                    f"task_names length ({len(self.task_names)}) must equal "
+                    f"total_outputs ({self.total_outputs})"
+                )
     
     def get_layer_sizes(self, branch_level: int) -> List[int]:
         """Get layer sizes for a specific branch level.

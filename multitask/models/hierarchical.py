@@ -6,7 +6,7 @@ This module implements a flexible hierarchical branching architecture for multi-
 
 import copy
 import tensorflow as tf
-from typing import Optional, Union, Dict, List, Any
+from typing import Optional, Union, Dict, List, Any, Tuple
 from multitask.config import ModelConfig
 
 
@@ -58,6 +58,7 @@ class MultiTaskModel(tf.keras.Model):
         self.config = config
         self.num_classes = num_classes
         self.dropout_rate = dropout
+        self.task_names = config.task_names
         
         # Validate configuration
         self._validate_config()
@@ -296,3 +297,96 @@ class MultiTaskModel(tf.keras.Model):
         lines.append("=" * 50)
         
         return "\n".join(lines)
+    
+    def get_task_info(self) -> List[Dict[str, Any]]:
+        """Get information about each task output.
+        
+        Returns a list where each element corresponds to a model output and contains:
+        - 'output_idx': The index of this output in the model's output tensor
+        - 'name': Task name if task_names provided, otherwise 'task_{idx}'
+        - 'parent_branch_path': List of branch indices tracing from root to this output
+        
+        The parent_branch_path shows the hierarchical path through the branching structure.
+        For example, [1, 2] means this output came from the 3rd child (index 2) of the 
+        2nd parent branch (index 1).
+        
+        Returns:
+            List of dictionaries with task information
+            
+        Example:
+            >>> config = ModelConfig(
+            ...     task_structure=[[3], [2, 5, 3]],
+            ...     task_names=['P1', 'P2', 'I1', 'I2', 'I3', 'I4', 'I5', 'W1', 'W2', 'W3']
+            ... )
+            >>> model = MultiTaskModel(config)
+            >>> info = model.get_task_info()
+            >>> info[0]
+            {'output_idx': 0, 'name': 'P1', 'parent_branch_path': [0, 0]}
+            >>> info[7]
+            {'output_idx': 7, 'name': 'W1', 'parent_branch_path': [2, 0]}
+        """
+        task_info = []
+        output_idx = 0
+        
+        # Get the final level of the hierarchy (the one that produces outputs)
+        final_level = self.config.task_structure[-1]
+        
+        # Trace back through the hierarchy to find parent paths
+        # We need to work through the structure to map each output to its parent path
+        
+        if len(self.config.task_structure) == 1:
+            # Simple case: only one level, each output is a direct branch
+            for branch_idx in range(final_level[0]):
+                task_info.append({
+                    'output_idx': output_idx,
+                    'name': self.task_names[output_idx] if self.task_names else f'task_{output_idx}',
+                    'parent_branch_path': [branch_idx]
+                })
+                output_idx += 1
+        else:
+            # Multi-level hierarchy: trace through the structure
+            # Build paths by traversing the hierarchy level by level
+            parent_paths = self._build_parent_paths()
+            
+            for path in parent_paths:
+                task_info.append({
+                    'output_idx': output_idx,
+                    'name': self.task_names[output_idx] if self.task_names else f'task_{output_idx}',
+                    'parent_branch_path': path
+                })
+                output_idx += 1
+        
+        return task_info
+    
+    def _build_parent_paths(self) -> List[List[int]]:
+        """Build the hierarchical paths for all outputs.
+        
+        Returns:
+            List of paths, where each path is a list of branch indices from root to leaf
+        """
+        paths = []
+        
+        # Start with paths at level 0 (initial branches)
+        num_initial_branches = self.config.task_structure[0][0]
+        current_paths = [[i] for i in range(num_initial_branches)]
+        
+        # Traverse through each level
+        for level_idx in range(1, len(self.config.task_structure)):
+            next_paths = []
+            level_structure = self.config.task_structure[level_idx]
+            
+            # For each parent path, add children according to level_structure
+            structure_idx = 0
+            for parent_path in current_paths:
+                num_children = level_structure[structure_idx]
+                
+                # Create a path for each child
+                for child_idx in range(num_children):
+                    child_path = parent_path + [child_idx]
+                    next_paths.append(child_path)
+                
+                structure_idx += 1
+            
+            current_paths = next_paths
+        
+        return current_paths
