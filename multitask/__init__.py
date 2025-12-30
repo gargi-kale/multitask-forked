@@ -19,6 +19,7 @@ __author__ = "Isaac D. Mehlhaff and Marco Morucci"
 # Import public API components
 from multitask.config import ModelConfig, TrainingConfig
 from multitask.models import MultiTaskModel
+from multitask.trainers import Trainer
 
 __all__ = [
     "__version__",
@@ -28,4 +29,6 @@ __all__ = [
     "TrainingConfig",
     # Models
     "MultiTaskModel",
+    # Training
+    "Trainer",
 ]
