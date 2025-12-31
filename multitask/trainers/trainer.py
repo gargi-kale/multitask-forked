@@ -5,6 +5,8 @@ This module provides the Trainer class that handles training loops, loss computa
 optimization, and threshold selection for multi-task learning models.
 """
 
+import json
+import os
 import numpy as np
 import tensorflow as tf
 from typing import Optional, Dict, List, Tuple, Any, Callable, Union
@@ -495,7 +497,10 @@ class Trainer:
         class_weights: Optional[List[Dict[int, float]]] = None,
         task_weights: Optional[List[float]] = None,
         callbacks: Optional[List[tf.keras.callbacks.Callback]] = None,
-        optimize_thresholds: bool = False
+        optimize_thresholds: bool = False,
+        checkpoint_dir: Optional[str] = None,
+        checkpoint_monitor: str = 'val_loss',
+        checkpoint_mode: str = 'min'
     ) -> Tuple[tf.keras.callbacks.History, Dict[str, Optional[float]]]:
         """Train the multi-task model.
         
@@ -520,6 +525,10 @@ class Trainer:
                                 on validation data (only for binary/multilabel tasks).
                                 If False, returns default thresholds (0.5 for binary/multilabel,
                                 None for multiclass).
+            checkpoint_dir: Optional directory to save model checkpoints during training.
+                           If provided, automatically saves best model based on checkpoint_monitor.
+            checkpoint_monitor: Metric to monitor for checkpointing (default: 'val_loss')
+            checkpoint_mode: Whether to minimize or maximize checkpoint_monitor ('min' or 'max')
             
         Returns:
             Tuple of (training history, thresholds dict):
@@ -527,6 +536,18 @@ class Trainer:
             - thresholds: Dict mapping task_name -> threshold value
                          (0.5 for binary/multilabel by default, None for multiclass)
                          If optimize_thresholds=True, contains optimized values
+                         
+        Example:
+            >>> # Basic training
+            >>> history, thresholds = trainer.fit(train_ds, val_ds, num_tasks=10)
+            >>> 
+            >>> # With threshold optimization and checkpointing
+            >>> history, thresholds = trainer.fit(
+            ...     train_ds, val_ds, num_tasks=10,
+            ...     optimize_thresholds=True,
+            ...     checkpoint_dir='checkpoints/model_v1',
+            ...     checkpoint_monitor='val_loss'
+            ... )
         """
         with self.strategy.scope():
             # Build or use custom loss function
@@ -576,6 +597,41 @@ class Trainer:
                     verbose=1
                 )
                 callback_list.append(early_stop)
+            
+            # Add checkpointing if requested
+            if checkpoint_dir is not None:
+                # Create a custom callback that uses our save_checkpoint method
+                class CheckpointCallback(tf.keras.callbacks.Callback):
+                    def __init__(self, trainer, filepath, monitor='val_loss', mode='min'):
+                        super().__init__()
+                        self.trainer = trainer
+                        self.filepath = filepath
+                        self.monitor = monitor
+                        self.mode = mode
+                        self.best_value = float('inf') if mode == 'min' else float('-inf')
+                        
+                    def on_epoch_end(self, epoch, logs=None):
+                        current = logs.get(self.monitor)
+                        if current is None:
+                            return
+                        
+                        is_better = (
+                            (self.mode == 'min' and current < self.best_value) or
+                            (self.mode == 'max' and current > self.best_value)
+                        )
+                        
+                        if is_better:
+                            self.best_value = current
+                            print(f"\nEpoch {epoch + 1}: {self.monitor} improved to {current:.4f}, saving checkpoint...")
+                            self.trainer.save_checkpoint(self.filepath, save_format='tf')
+                
+                checkpoint_callback = CheckpointCallback(
+                    trainer=self,
+                    filepath=checkpoint_dir,
+                    monitor=checkpoint_monitor,
+                    mode=checkpoint_mode
+                )
+                callback_list.append(checkpoint_callback)
             
             # Train model
             print(f"\nTraining with config:")
@@ -862,4 +918,184 @@ class Trainer:
         print("=" * 60 + "\n")
         
         return results
+    
+    def save_checkpoint(
+        self,
+        filepath: str,
+        thresholds: Optional[Dict[str, Optional[float]]] = None,
+        save_format: str = 'tf',
+        save_optimizer: bool = True
+    ) -> None:
+        """Save training checkpoint including model, thresholds, and optimizer state.
+        
+        Saves everything needed to resume training. Model and thresholds are also
+        saved via model.save(), so this checkpoint is self-contained.
+        
+        Args:
+            filepath: Directory path to save checkpoint
+            thresholds: Optional dict of task_name -> threshold values.
+                       If None, uses self.thresholds if available.
+            save_format: Format to save weights ('tf' or 'h5')
+            save_optimizer: Whether to save optimizer state for training resumption.
+                          Use False for deployment-only to save space (~2x reduction).
+            
+        Example:
+            >>> history, thresholds = trainer.fit(train_ds, val_ds, optimize_thresholds=True)
+            >>> trainer.save_checkpoint('checkpoints/model_v1', thresholds)
+            >>> 
+            >>> # Load for inference
+            >>> trainer, thresholds = Trainer.load_checkpoint('checkpoints/model_v1')
+            >>> 
+            >>> # Load for continued training (restores optimizer)
+            >>> trainer, thresholds = Trainer.load_checkpoint(
+            ...     'checkpoints/model_v1', load_optimizer=True, compile_model=True)
+        """
+        # Use provided thresholds or get from trainer
+        thresholds_to_save = thresholds if thresholds is not None else getattr(self, 'thresholds', None)
+        
+        # Save model with thresholds (includes weights, config, encoder, thresholds)
+        self.model.save(filepath, save_format=save_format, thresholds=thresholds_to_save)
+        
+        # Save optimizer state if requested and model is compiled
+        if save_optimizer and hasattr(self.model, 'optimizer') and self.model.optimizer is not None:
+            optimizer_weights_path = os.path.join(filepath, 'optimizer.pkl')
+            try:
+                import pickle
+                # Get optimizer weights (includes momentum, running averages, etc.)
+                optimizer_weights = self.model.optimizer.get_weights()
+                with open(optimizer_weights_path, 'wb') as f:
+                    pickle.dump(optimizer_weights, f)
+                print(f"  - Optimizer state: {optimizer_weights_path}")
+            except Exception as e:
+                print(f"  ⚠️  Warning: Could not save optimizer state: {e}")
+        
+        # Save training config (for reference, not needed for loading)
+        training_config_dict = {
+            'epochs': self.config.epochs,
+            'batch_size': self.config.batch_size,
+            'learning_rate': self.config.learning_rate,
+            'weight_decay': self.config.weight_decay,
+            'warmup_steps': self.config.warmup_steps,
+            'dropout_rate': self.config.dropout_rate,
+            'early_stopping_patience': self.config.early_stopping_patience,
+            'learning_rate_schedule': self.config.learning_rate_schedule,
+        }
+        
+        with open(os.path.join(filepath, 'training_config.json'), 'w') as f:
+            json.dump(training_config_dict, f, indent=2)
+        
+        print(f"Checkpoint saved to {filepath}/")
+    
+    @staticmethod
+    def load_checkpoint(
+        filepath: str,
+        encoder: Optional[Union[str, tf.keras.layers.Layer]] = None,
+        custom_objects: Optional[dict] = None,
+        load_optimizer: bool = True,
+        compile_model: bool = False
+    ) -> Tuple['Trainer', Optional[Dict[str, Optional[float]]]]:
+        """Load a complete training checkpoint.
+        
+        Restores a Trainer instance with model and training state from a saved checkpoint.
+        
+        Args:
+            filepath: Directory path containing saved checkpoint
+            encoder: Optional encoder override (see load_model documentation)
+            custom_objects: Optional dict of custom objects for deserialization
+            load_optimizer: Whether to restore optimizer state for training resumption.
+                          Only works if model is compiled first.
+            compile_model: Whether to compile the model after loading. Required if
+                         load_optimizer=True. Uses saved training config.
+            
+        Returns:
+            Tuple of (Trainer instance, thresholds dict or None)
+            
+        Example:
+            >>> # Load for inference only
+            >>> trainer, thresholds = Trainer.load_checkpoint('checkpoints/best_model')
+            >>> results = trainer.evaluate(test_dataset, thresholds=thresholds)
+            >>> 
+            >>> # Load for continued training (restores optimizer)
+            >>> trainer, thresholds = Trainer.load_checkpoint(
+            ...     'checkpoints/best_model',
+            ...     load_optimizer=True,
+            ...     compile_model=True
+            ... )
+            >>> # Continue training with restored optimizer state
+            >>> history, new_thresholds = trainer.fit(train_ds, val_ds, num_tasks=10)
+        """
+        from ..models.persistence import load_model
+        
+        # Load model (includes weights, config, encoder, AND thresholds if saved)
+        model, thresholds = load_model(filepath, encoder=encoder, custom_objects=custom_objects)
+        
+        # Load training config if available
+        training_config_path = os.path.join(filepath, 'training_config.json')
+        if os.path.exists(training_config_path):
+            with open(training_config_path, 'r') as f:
+                training_config_dict = json.load(f)
+            config = TrainingConfig(**training_config_dict)
+        else:
+            # Use default config
+            config = TrainingConfig()
+        
+        # Create trainer
+        trainer = Trainer(model=model, config=config)
+        
+        # Attach thresholds if loaded
+        if thresholds is not None:
+            trainer.thresholds = thresholds
+        
+        # Compile model if requested (needed for optimizer loading)
+        if compile_model:
+            # Build a basic loss function for compilation
+            # User will need to call fit() which rebuilds with proper weights
+            def dummy_loss(y_true, y_pred):
+                return tf.reduce_mean(y_pred)  # Placeholder
+            
+            model.compile(
+                optimizer=trainer._build_optimizer(steps_per_epoch=100),
+                loss=dummy_loss
+            )
+        
+        # Load optimizer state if available and requested
+        if load_optimizer and compile_model:
+            optimizer_weights_path = os.path.join(filepath, 'optimizer.pkl')
+            if os.path.exists(optimizer_weights_path):
+                try:
+                    import pickle
+                    with open(optimizer_weights_path, 'rb') as f:
+                        optimizer_weights = pickle.load(f)
+                    
+                    # Need to call the model once to initialize optimizer variables
+                    # This is a TensorFlow requirement before setting optimizer weights
+                    dummy_input = tf.zeros((1, 128))  # Placeholder
+                    if model.uses_encoder:
+                        if model.encoder_type == 'huggingface':
+                            dummy_input = {
+                                'input_ids': tf.zeros((1, 128), dtype=tf.int32),
+                                'attention_mask': tf.ones((1, 128), dtype=tf.int32),
+                                'token_type_ids': tf.zeros((1, 128), dtype=tf.int32),
+                            }
+                        else:
+                            dummy_input = {
+                                'input_word_ids': tf.zeros((1, 128), dtype=tf.int32),
+                                'input_mask': tf.ones((1, 128), dtype=tf.int32),
+                                'input_type_ids': tf.zeros((1, 128), dtype=tf.int32),
+                            }
+                    
+                    with tf.GradientTape() as tape:
+                        _ = model(dummy_input, training=True)
+                    
+                    # Now set optimizer weights
+                    model.optimizer.set_weights(optimizer_weights)
+                    print(f"  - Optimizer state restored")
+                except Exception as e:
+                    print(f"  ⚠️  Warning: Could not restore optimizer state: {e}")
+            elif load_optimizer:
+                print(f"  ℹ️  No optimizer state found at {optimizer_weights_path}")
+        
+        print(f"Checkpoint loaded from {filepath}/")
+        
+        return trainer, thresholds
 

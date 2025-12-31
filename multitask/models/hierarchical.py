@@ -95,6 +95,9 @@ class MultiTaskModel(tf.keras.Model):
         if encoder is not None:
             # Using a pre-trained encoder
             if isinstance(encoder, str):
+                # Store identifier for save/load
+                self._encoder_identifier = encoder
+                
                 if encoder.startswith('https://tfhub.dev/'):
                     # TensorFlow Hub model
                     import tensorflow_hub as hub
@@ -116,6 +119,7 @@ class MultiTaskModel(tf.keras.Model):
                 # Custom Keras layer
                 self.encoder = encoder
                 self.encoder_type = 'custom'
+                self._encoder_identifier = None
             self.uses_encoder = True
             self.embedding_dim = None
         else:
@@ -124,6 +128,7 @@ class MultiTaskModel(tf.keras.Model):
                 raise ValueError("Must specify embedding_dim when not using an encoder")
             self.encoder = None
             self.encoder_type = None
+            self._encoder_identifier = None
             self.uses_encoder = False
             self.embedding_dim = embedding_dim
     
@@ -738,3 +743,89 @@ class MultiTaskModel(tf.keras.Model):
             print("=" * 60 + "\n")
         
         return True
+    
+    def save(self, filepath: str, save_format: str = 'tf', thresholds: Optional[Dict[str, Optional[float]]] = None) -> None:
+        """Save model with all necessary components for deployment.
+        
+        Saves:
+        - Model weights (architecture + parameters)
+        - Model config (task structure, types, num classes)
+        - Encoder information (type, URL/model name)
+        - Optimized thresholds (if provided)
+        - Model metadata
+        
+        Args:
+            filepath: Directory path to save model artifacts
+            save_format: Format to save weights ('tf' or 'h5')
+            thresholds: Optional dict of task_name -> threshold values for classification.
+                       Essential for binary/multilabel tasks. If None, thresholds must be
+                       provided during inference via evaluate() or predict().
+            
+        Example:
+            >>> # Save with optimized thresholds
+            >>> history, thresholds = trainer.fit(train_ds, val_ds, optimize_thresholds=True)
+            >>> model.save('my_model', thresholds=thresholds)
+            >>> 
+            >>> # Load later
+            >>> from multitask import load_model
+            >>> model = load_model('my_model')  # Thresholds included
+        """
+        import json
+        import os
+        
+        # Create save directory
+        os.makedirs(filepath, exist_ok=True)
+        
+        # Save model weights
+        weights_path = os.path.join(filepath, 'weights')
+        if save_format == 'tf':
+            self.save_weights(weights_path, save_format='tf')
+        else:
+            self.save_weights(weights_path + '.h5', save_format='h5')
+        
+        # Save ModelConfig
+        config_dict = {
+            'task_structure': self.config.task_structure,
+            'task_types': self.config.task_types,
+            'num_classes_per_task': self.config.num_classes_per_task,
+            'task_names': self.config.task_names,
+            'shared_layer_sizes': self.config.shared_layer_sizes,
+            'branch_layer_sizes': self.config.branch_layer_sizes,
+            'default_layer_sizes': self.config.default_layer_sizes,
+            'trainable_encoder': self.config.trainable_encoder,
+            'pooling_strategy': self.config.pooling_strategy,
+        }
+        
+        with open(os.path.join(filepath, 'config.json'), 'w') as f:
+            json.dump(config_dict, f, indent=2)
+        
+        # Save metadata (encoder info, model settings)
+        metadata = {
+            'encoder_type': self.encoder_type,
+            'uses_encoder': self.uses_encoder,
+            'embedding_dim': self.embedding_dim,
+            'num_classes': self.num_classes,
+            'dropout_rate': self.dropout_rate,
+        }
+        
+        # Save encoder identifier if using encoder
+        if self.uses_encoder and hasattr(self, '_encoder_identifier'):
+            metadata['encoder_identifier'] = self._encoder_identifier
+        
+        with open(os.path.join(filepath, 'metadata.json'), 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        # Save thresholds if provided
+        if thresholds is not None:
+            with open(os.path.join(filepath, 'thresholds.json'), 'w') as f:
+                json.dump(thresholds, f, indent=2)
+        
+        print(f"Model saved to {filepath}/")
+        print(f"  - Weights: {weights_path}")
+        print(f"  - Config: {os.path.join(filepath, 'config.json')}")
+        print(f"  - Metadata: {os.path.join(filepath, 'metadata.json')}")
+        if thresholds is not None:
+            print(f"  - Thresholds: {os.path.join(filepath, 'thresholds.json')}")
+        print(f"  - Weights: {weights_path}")
+        print(f"  - Config: {os.path.join(filepath, 'config.json')}")
+        print(f"  - Metadata: {os.path.join(filepath, 'metadata.json')}")
