@@ -496,7 +496,7 @@ class Trainer:
         task_weights: Optional[List[float]] = None,
         callbacks: Optional[List[tf.keras.callbacks.Callback]] = None,
         optimize_thresholds: bool = False
-    ) -> Union[tf.keras.callbacks.History, Tuple[tf.keras.callbacks.History, Dict[str, float]]]:
+    ) -> Tuple[tf.keras.callbacks.History, Dict[str, Optional[float]]]:
         """Train the multi-task model.
         
         The training process:
@@ -517,12 +517,16 @@ class Trainer:
             task_weights: Optional task importance weights for relative task prioritization
             callbacks: Additional Keras callbacks
             optimize_thresholds: Whether to find optimal classification thresholds
-                                on validation data (only for binary/multilabel tasks)
+                                on validation data (only for binary/multilabel tasks).
+                                If False, returns default thresholds (0.5 for binary/multilabel,
+                                None for multiclass).
             
         Returns:
-            If optimize_thresholds=False: training history object
-            If optimize_thresholds=True: tuple of (training history, thresholds dict)
-                where thresholds dict maps task_name -> optimal_threshold (or None for multiclass)
+            Tuple of (training history, thresholds dict):
+            - history: Keras History object with training metrics
+            - thresholds: Dict mapping task_name -> threshold value
+                         (0.5 for binary/multilabel by default, None for multiclass)
+                         If optimize_thresholds=True, contains optimized values
         """
         with self.strategy.scope():
             # Build or use custom loss function
@@ -618,9 +622,22 @@ class Trainer:
                 valid_f1_scores = [f1 for f1 in f1_scores.values() if f1 is not None and f1 > 0]
                 if valid_f1_scores:
                     print(f"Average validation F1: {np.mean(valid_f1_scores):.4f}")
-                return self.history, self.optimal_thresholds
+            else:
+                # Use default thresholds for transparency
+                print("\nUsing default thresholds (0.5 for binary/multilabel, None for multiclass)")
+                self.optimal_thresholds = {}
+                task_names = self.model.task_names or [f'task_{i}' for i in range(num_tasks)]
+                
+                for task_idx, task_name in enumerate(sorted(task_names)):
+                    task_type = self.model.config.get_task_type(task_idx)
+                    if task_type == 'multiclass':
+                        self.optimal_thresholds[task_name] = None
+                    else:
+                        # Binary or multilabel: use 0.5 as default
+                        self.optimal_thresholds[task_name] = 0.5
             
-        return self.history
+            # Always return tuple for consistency
+            return self.history, self.optimal_thresholds
     
     def evaluate(
         self,
