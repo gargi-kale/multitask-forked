@@ -97,9 +97,9 @@ for task_name in original_output.keys():
     diff = tf.reduce_mean(tf.abs(original_output[task_name] - loaded_output[task_name]))
     print(f"  {task_name}: Mean absolute difference = {diff.numpy():.6f}")
     if diff.numpy() > 1e-5:
-        print(f"    ⚠️  WARNING: Outputs differ significantly!")
+        print(f"     WARNING: Outputs differ significantly!")
     else:
-        print(f"    ✓ Outputs match")
+        print(f"    Outputs match")
 
 # Test checkpoint load
 print("\n" + "="*60)
@@ -117,9 +117,9 @@ thresholds_match = all(
 )
 
 if thresholds_match:
-    print("✓ Thresholds match!")
+    print("Thresholds match!")
 else:
-    print("⚠️  WARNING: Thresholds don't match!")
+    print("  WARNING: Thresholds don't match!")
 
 # Test evaluation with loaded model
 print("\n" + "="*60)

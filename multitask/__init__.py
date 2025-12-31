@@ -21,6 +21,12 @@ from multitask.config import ModelConfig, TrainingConfig
 from multitask.models import MultiTaskModel
 from multitask.models.persistence import load_model
 from multitask.trainers import Trainer
+from multitask.utils.distributed import (
+    get_distribution_strategy,
+    setup_gpu_memory_growth,
+    check_distributed_compatibility,
+    print_device_info,
+)
 
 __all__ = [
     "__version__",
@@ -33,4 +39,9 @@ __all__ = [
     "load_model",
     # Training
     "Trainer",
+    # Distributed training
+    "get_distribution_strategy",
+    "setup_gpu_memory_growth",
+    "check_distributed_compatibility",
+    "print_device_info",
 ]

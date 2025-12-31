@@ -967,7 +967,7 @@ class Trainer:
                     pickle.dump(optimizer_weights, f)
                 print(f"  - Optimizer state: {optimizer_weights_path}")
             except Exception as e:
-                print(f"  ⚠️  Warning: Could not save optimizer state: {e}")
+                print(f"    Warning: Could not save optimizer state: {e}")
         
         # Save training config (for reference, not needed for loading)
         training_config_dict = {
@@ -1091,9 +1091,9 @@ class Trainer:
                     model.optimizer.set_weights(optimizer_weights)
                     print(f"  - Optimizer state restored")
                 except Exception as e:
-                    print(f"  ⚠️  Warning: Could not restore optimizer state: {e}")
+                    print(f"    Warning: Could not restore optimizer state: {e}")
             elif load_optimizer:
-                print(f"  ℹ️  No optimizer state found at {optimizer_weights_path}")
+                print(f"    No optimizer state found at {optimizer_weights_path}")
         
         print(f"Checkpoint loaded from {filepath}/")
         

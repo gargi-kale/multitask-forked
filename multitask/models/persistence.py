@@ -2,7 +2,7 @@
 
 import json
 import os
-from typing import Optional, Union
+from typing import Optional, Union, Dict
 
 import tensorflow as tf
 

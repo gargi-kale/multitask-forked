@@ -726,9 +726,9 @@ model = MultiTaskModel(
 # Validate dataset format
 try:
     model.validate_dataset(train_dataset, num_batches=3, verbose=True)
-    print("✓ Dataset validation passed!")
+    print("Dataset validation passed!")
 except ValueError as e:
-    print(f"❌ Dataset validation failed: {e}")
+    print(f"Dataset validation failed: {e}")
     # Fix your data based on the error message
 ```
 
