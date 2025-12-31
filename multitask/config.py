@@ -116,6 +116,17 @@ class ModelConfig:
     # These correspond to the final level outputs in order
     task_names: Optional[List[str]] = None
     
+    # Task types: 'binary', 'multiclass', or 'multilabel'
+    # If provided, must be a flat list with length equal to total_tasks (final level outputs)
+    # Defaults to 'binary' for all tasks if not provided
+    task_types: Optional[List[str]] = None
+    
+    # Number of classes per task (for multiclass tasks)
+    # Only needed for 'multiclass' tasks. Binary tasks default to 2, multiclass needs explicit count.
+    # Must be a list of length equal to total_tasks
+    # Example: [2, 2, 5, 2, 2, 3, 2, 2, 2, 2] for 10 tasks (some binary, some multiclass)
+    num_classes_per_task: Optional[List[int]] = None
+    
     def __post_init__(self):
         """Validate configuration after initialization."""
         # Validate task structure
@@ -168,6 +179,44 @@ class ModelConfig:
         if self.pooling_strategy not in valid_pooling:
             raise ValueError(f"pooling_strategy must be one of {valid_pooling}")
         
+        # Validate task_types if provided
+        if self.task_types is not None:
+            if len(self.task_types) != self.total_outputs:
+                raise ValueError(
+                    f"task_types length ({len(self.task_types)}) must equal "
+                    f"total_outputs ({self.total_outputs})"
+                )
+            valid_types = {'binary', 'multiclass', 'multilabel'}
+            for task_type in self.task_types:
+                if task_type not in valid_types:
+                    raise ValueError(
+                        f"Invalid task_type '{task_type}'. Must be one of {valid_types}"
+                    )
+        
+        # Validate num_classes_per_task if provided
+        if self.num_classes_per_task is not None:
+            if len(self.num_classes_per_task) != self.total_outputs:
+                raise ValueError(
+                    f"num_classes_per_task length ({len(self.num_classes_per_task)}) must equal "
+                    f"total_outputs ({self.total_outputs})"
+                )
+            if not all(n >= 2 for n in self.num_classes_per_task):
+                raise ValueError("All num_classes_per_task values must be >= 2")
+            
+            # If task_types is specified, validate consistency
+            if self.task_types is not None:
+                for task_idx, (task_type, num_classes) in enumerate(zip(self.task_types, self.num_classes_per_task)):
+                    if task_type == 'binary' and num_classes != 2:
+                        raise ValueError(
+                            f"Task {task_idx} is type 'binary' but num_classes_per_task[{task_idx}]={num_classes}. "
+                            f"Binary tasks should have num_classes=2."
+                        )
+                    elif task_type == 'multiclass' and num_classes < 3:
+                        raise ValueError(
+                            f"Task {task_idx} is type 'multiclass' but num_classes_per_task[{task_idx}]={num_classes}. "
+                            f"Multiclass tasks should have num_classes >= 3."
+                        )
+        
         # Validate task_names if provided
         if self.task_names is not None:
             if len(self.task_names) != self.total_outputs:
@@ -208,4 +257,51 @@ class ModelConfig:
         Returns:
             Total number of branches at that level
         """
-        return sum(self.task_structure[level])
+        return sum(self.task_structure[level])    
+    def get_task_type(self, task_idx: int) -> str:
+        """Get the type of a specific task.
+        
+        Args:
+            task_idx: The task index (0-indexed)
+            
+        Returns:
+            Task type: 'binary', 'multiclass', or 'multilabel'
+        """
+        if self.task_types is None:
+            return 'binary'
+        return self.task_types[task_idx]
+    
+    def get_num_classes(self, task_idx: int) -> int:
+        """Get the number of classes for a specific task.
+        
+        Args:
+            task_idx: The task index (0-indexed)
+            
+        Returns:
+            Number of classes (2 for binary, K for multiclass)
+        """
+        if self.num_classes_per_task is None:
+            return 2  # Default to binary
+        return self.num_classes_per_task[task_idx]
+    
+    def get_output_dim_for_task(self, task_idx: int) -> int:
+        """Get the output dimension for a specific task.
+        
+        Binary tasks output 1 dimension (probability of class 1).
+        Multiclass tasks output K dimensions (probability distribution).
+        
+        Args:
+            task_idx: The task index (0-indexed)
+            
+        Returns:
+            Output dimension for this task
+        """
+        task_type = self.get_task_type(task_idx)
+        num_classes = self.get_num_classes(task_idx)
+        
+        if task_type == 'binary':
+            return 1
+        elif task_type == 'multiclass' or task_type == 'multilabel':
+            return num_classes
+        else:
+            raise ValueError(f"Unknown task_type: {task_type}")

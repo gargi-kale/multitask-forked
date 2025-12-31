@@ -173,16 +173,47 @@ class MultiTaskModel(tf.keras.Model):
             self.branch_layers.append(branch_level_layers)
     
     def _build_output_layers(self):
-        """Build output layers for final predictions."""
-        num_outputs = self.config.total_outputs
-        self.output_layers = [
-            tf.keras.layers.Dense(
-                1, 
-                activation='sigmoid',
-                name=f'output_{i}'
-            )
-            for i in range(num_outputs)
-        ]
+        """Build output layers for final predictions.
+        
+        Each task gets one or more output units depending on its type:
+        - Binary: 1 unit with sigmoid activation
+        - Multiclass: K units with softmax activation
+        - Multilabel: K units with sigmoid activation
+        """
+        self.output_layers = {}
+        
+        for task_idx in range(self.config.total_outputs):
+            task_type = self.config.get_task_type(task_idx)
+            num_classes = self.config.get_num_classes(task_idx)
+            output_dim = self.config.get_output_dim_for_task(task_idx)
+            task_name = self.task_names[task_idx] if self.task_names else f'task_{task_idx}'
+            
+            if task_type == 'binary':
+                # Binary classification: 1 output with sigmoid
+                layer = tf.keras.layers.Dense(
+                    output_dim,
+                    activation='sigmoid',
+                    name=f'{task_name}_output'
+                )
+            elif task_type == 'multiclass':
+                # Multiclass: K outputs with softmax
+                layer = tf.keras.layers.Dense(
+                    output_dim,
+                    activation='softmax',
+                    name=f'{task_name}_output'
+                )
+            elif task_type == 'multilabel':
+                # Multilabel: K outputs with sigmoid
+                layer = tf.keras.layers.Dense(
+                    output_dim,
+                    activation='sigmoid',
+                    name=f'{task_name}_output'
+                )
+            else:
+                raise ValueError(f"Unknown task_type: {task_type}")
+            
+            self.output_layers[task_name] = layer
+    
     
     def call(
         self, 
@@ -242,15 +273,14 @@ class MultiTaskModel(tf.keras.Model):
             branch_reps = next_level_reps
         
         # Apply output layers to final branch representations
-        outputs = []
-        for i, branch_rep in enumerate(branch_reps):
-            output = self.output_layers[i](branch_rep, training=training)
-            outputs.append(output)
+        # Return as dictionary mapping task names to outputs
+        output_dict = {}
+        for task_idx, branch_rep in enumerate(branch_reps):
+            task_name = self.task_names[task_idx] if self.task_names else f'task_{task_idx}'
+            output = self.output_layers[task_name](branch_rep, training=training)
+            output_dict[task_name] = output
         
-        # Concatenate all outputs
-        final_output = tf.keras.layers.Concatenate(axis=1)(outputs)
-        
-        return final_output
+        return output_dict
     
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization."""
@@ -389,4 +419,74 @@ class MultiTaskModel(tf.keras.Model):
             
             current_paths = next_paths
         
-        return current_paths
+        return current_paths    
+    def flatten_outputs(
+        self, 
+        output_dict: Dict[str, tf.Tensor]
+    ) -> Tuple[tf.Tensor, Dict[str, Tuple[int, int]]]:
+        """Convert dictionary outputs to concatenated tensor for external tools.
+        
+        Useful when integrating with external tools that expect tensor outputs.
+        Provides mapping of where each task's output is located in the concatenated tensor.
+        
+        Args:
+            output_dict: Dictionary output from model.predict() or model()
+            
+        Returns:
+            Tuple of:
+                - concatenated_tensor: [batch_size, total_output_dims]
+                - task_indices: Dict mapping task_name -> (start_col, end_col) in tensor
+                
+        Example:
+            >>> predictions = model.predict(data)  # Returns dict
+            >>> tensor, indices = model.flatten_outputs(predictions)
+            >>> # tensor shape might be [32, 14] for mixed binary/multiclass
+            >>> # indices = {'task_0': (0, 1), 'task_1': (1, 2), 'task_2': (2, 7), ...}
+        """
+        task_names = sorted(output_dict.keys())
+        tensors = [output_dict[name] for name in task_names]
+        concatenated = tf.concat(tensors, axis=1)
+        
+        # Track where each task's output is
+        task_indices = {}
+        start = 0
+        for task_name in task_names:
+            num_dims = output_dict[task_name].shape[-1]
+            task_indices[task_name] = (start, start + num_dims)
+            start += num_dims
+        
+        return concatenated, task_indices
+    
+    def unflatten_outputs(
+        self, 
+        concatenated_tensor: tf.Tensor
+    ) -> Dict[str, tf.Tensor]:
+        """Convert concatenated tensor back to dictionary format.
+        
+        Reverse of flatten_outputs. Useful after processing with external tools.
+        
+        Args:
+            concatenated_tensor: Tensor output shape [batch_size, total_output_dims]
+            
+        Returns:
+            Dictionary with task outputs matching original structure
+            
+        Example:
+            >>> external_result = external_tool(tensor_output)
+            >>> output_dict = model.unflatten_outputs(external_result)
+            >>> # output_dict['task_0'] has shape [batch_size, 1]
+            >>> # output_dict['task_2'] has shape [batch_size, 5]
+        """
+        if self.task_names is None:
+            task_names = [f'task_{i}' for i in range(self.config.total_outputs)]
+        else:
+            task_names = self.task_names
+        
+        output_dict = {}
+        start = 0
+        for task_name in task_names:
+            output_dim = self.config.get_output_dim_for_task(task_names.index(task_name))
+            output_dict[task_name] = concatenated_tensor[:, start:start+output_dim]
+            start += output_dim
+        
+        return output_dict
