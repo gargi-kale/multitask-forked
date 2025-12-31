@@ -500,7 +500,8 @@ class Trainer:
         optimize_thresholds: bool = False,
         checkpoint_dir: Optional[str] = None,
         checkpoint_monitor: str = 'val_loss',
-        checkpoint_mode: str = 'min'
+        checkpoint_mode: str = 'min',
+        verbose: int = 1
     ) -> Tuple[tf.keras.callbacks.History, Dict[str, Optional[float]]]:
         """Train the multi-task model.
         
@@ -529,6 +530,7 @@ class Trainer:
                            If provided, automatically saves best model based on checkpoint_monitor.
             checkpoint_monitor: Metric to monitor for checkpointing (default: 'val_loss')
             checkpoint_mode: Whether to minimize or maximize checkpoint_monitor ('min' or 'max')
+            verbose: Verbosity mode for model.fit() (0=silent, 1=progress bar, 2=one line per epoch)
             
         Returns:
             Tuple of (training history, thresholds dict):
@@ -649,7 +651,7 @@ class Trainer:
                 steps_per_epoch=steps_per_epoch,
                 validation_steps=validation_steps,
                 callbacks=callback_list,
-                verbose=1
+                verbose=verbose
             )
             
             # Optionally find optimal thresholds on validation data
