@@ -490,3 +490,218 @@ class MultiTaskModel(tf.keras.Model):
             start += output_dim
         
         return output_dict
+    
+    def validate_dataset(
+        self,
+        dataset: tf.data.Dataset,
+        num_batches: int = 3,
+        verbose: bool = True
+    ) -> bool:
+        """Validate dataset format and structure before training.
+        
+        Checks:
+        - Dataset yields (inputs, labels_dict) tuples
+        - Input format matches model type (dict for encoder, tensor for embeddings)
+        - Input shapes are reasonable
+        - Labels dict has correct structure and task names
+        - Label shapes and values are valid for their task types
+        - Batch consistency across multiple batches
+        
+        Args:
+            dataset: TensorFlow Dataset to validate
+            num_batches: Number of batches to sample for validation (default: 3)
+            verbose: Whether to print validation results (default: True)
+            
+        Returns:
+            True if validation passes
+            
+        Raises:
+            ValueError: With detailed error message if validation fails
+        """
+        if verbose:
+            print("\nValidating dataset structure...")
+            print("=" * 60)
+        
+        batch_count = 0
+        last_batch_sizes = []
+        
+        try:
+            for inputs, labels_dict in dataset.take(num_batches):
+                batch_count += 1
+                # Get batch size from inputs
+                if isinstance(inputs, (list, tuple)):
+                    batch_size = inputs[0].shape[0]
+                elif isinstance(inputs, dict):
+                    batch_size = next(iter(inputs.values())).shape[0]
+                else:
+                    batch_size = inputs.shape[0]
+                last_batch_sizes.append(batch_size)
+                
+                # ===== VALIDATE INPUTS =====
+                if self.uses_encoder:
+                    # Expecting dict (BERT, etc.) or tensor input
+                    if isinstance(inputs, dict):
+                        # Dict input (typical for BERT)
+                        for key, value in inputs.items():
+                            if not tf.is_tensor(value):
+                                raise ValueError(
+                                    f"Input dict value for key '{key}' is not a tensor. "
+                                    f"Type: {type(value)}"
+                                )
+                            if len(value.shape) < 2:
+                                raise ValueError(
+                                    f"Input tensor '{key}' has shape {value.shape}. "
+                                    f"Expected at least 2D (batch_size, sequence_length)."
+                                )
+                            if value.shape[0] != batch_size:
+                                raise ValueError(
+                                    f"Batch size mismatch in input '{key}': "
+                                    f"{value.shape[0]} vs {batch_size}"
+                                )
+                    elif tf.is_tensor(inputs):
+                        # Tensor input
+                        if len(inputs.shape) < 2:
+                            raise ValueError(
+                                f"Input tensor has shape {inputs.shape}. "
+                                f"Expected at least 2D (batch_size, sequence_length)."
+                            )
+                    else:
+                        raise ValueError(
+                            f"Input must be dict or tensor. Got {type(inputs)}"
+                        )
+                else:
+                    # Expecting embedding tensor
+                    if not tf.is_tensor(inputs):
+                        raise ValueError(
+                            f"Model uses embeddings but input is {type(inputs)}. "
+                            f"Expected tensor shape [batch_size, {self.embedding_dim}]"
+                        )
+                    if len(inputs.shape) != 2:
+                        raise ValueError(
+                            f"Embedding input must be 2D but got shape {inputs.shape}. "
+                            f"Expected [batch_size, embedding_dim]"
+                        )
+                    if inputs.shape[1] != self.embedding_dim:
+                        raise ValueError(
+                            f"Embedding dimension mismatch: got {inputs.shape[1]}, "
+                            f"expected {self.embedding_dim}"
+                        )
+                
+                # ===== VALIDATE LABELS =====
+                if not isinstance(labels_dict, dict):
+                    raise ValueError(
+                        f"Labels must be a dictionary mapping task names to label tensors. "
+                        f"Got {type(labels_dict)}"
+                    )
+                
+                # Check task names
+                expected_task_names = set(self.task_names) if self.task_names else set(f'task_{i}' for i in range(self.config.total_outputs))
+                actual_task_names = set(labels_dict.keys())
+                
+                if expected_task_names != actual_task_names:
+                    raise ValueError(
+                        f"Label task names mismatch.\n"
+                        f"Expected: {sorted(expected_task_names)}\n"
+                        f"Got: {sorted(actual_task_names)}"
+                    )
+                
+                # Validate each task's labels
+                for task_idx, task_name in enumerate(sorted(labels_dict.keys())):
+                    labels = labels_dict[task_name]
+                    task_type = self.config.get_task_type(task_idx)
+                    num_classes = self.config.get_num_classes(task_idx)
+                    
+                    # Check tensor
+                    if not tf.is_tensor(labels):
+                        raise ValueError(
+                            f"Labels for '{task_name}' must be tensor, got {type(labels)}"
+                        )
+                    
+                    # Check batch size matches
+                    if labels.shape[0] != batch_size:
+                        raise ValueError(
+                            f"Labels batch size mismatch for '{task_name}': "
+                            f"{labels.shape[0]} vs {batch_size}"
+                        )
+                    
+                    # Check shape and values based on task type
+                    if task_type == 'binary':
+                        # Binary: [batch_size] or [batch_size, 1], values in {0, 1, -1}
+                        if len(labels.shape) == 2 and labels.shape[1] != 1:
+                            raise ValueError(
+                                f"Binary task '{task_name}' has shape {labels.shape}. "
+                                f"Expected [batch_size] or [batch_size, 1]"
+                            )
+                        
+                        label_values = tf.unique(tf.reshape(labels, [-1]))[0].numpy()
+                        invalid_values = [v for v in label_values if v not in [-1, 0, 1]]
+                        if invalid_values:
+                            raise ValueError(
+                                f"Binary task '{task_name}' has invalid values {invalid_values}. "
+                                f"Expected 0, 1, or -1 (mask)"
+                            )
+                    
+                    elif task_type == 'multiclass':
+                        # Multiclass: [batch_size], values in {0..K-1, -1}
+                        if len(labels.shape) != 1:
+                            raise ValueError(
+                                f"Multiclass task '{task_name}' has shape {labels.shape}. "
+                                f"Expected [batch_size] (class indices)"
+                            )
+                        
+                        label_values = tf.unique(labels)[0].numpy()
+                        valid_values = set(range(num_classes)) | {-1}
+                        invalid_values = [v for v in label_values if v not in valid_values]
+                        if invalid_values:
+                            raise ValueError(
+                                f"Multiclass task '{task_name}' (num_classes={num_classes}) "
+                                f"has invalid values {invalid_values}. "
+                                f"Expected 0..{num_classes-1} or -1 (mask)"
+                            )
+                    
+                    elif task_type == 'multilabel':
+                        # Multilabel: [batch_size, num_classes], values in {0, 1, -1}
+                        if len(labels.shape) != 2 or labels.shape[1] != num_classes:
+                            raise ValueError(
+                                f"Multilabel task '{task_name}' has shape {labels.shape}. "
+                                f"Expected [batch_size, {num_classes}]"
+                            )
+                        
+                        label_values = tf.unique(tf.reshape(labels, [-1]))[0].numpy()
+                        invalid_values = [v for v in label_values if v not in [-1, 0, 1]]
+                        if invalid_values:
+                            raise ValueError(
+                                f"Multilabel task '{task_name}' has invalid values {invalid_values}. "
+                                f"Expected 0, 1, or -1 (mask)"
+                            )
+                    
+                    # Warn if all labels are masked
+                    num_valid = tf.reduce_sum(tf.cast(labels != -1, tf.int32)).numpy()
+                    if num_valid == 0:
+                        if verbose:
+                            print(f"Warning: All labels are masked (-1) for task '{task_name}'")
+                
+                if verbose:
+                    print(f"Batch {batch_count}: inputs OK, {len(labels_dict)} task labels OK")
+        
+        except StopIteration:
+            if batch_count == 0:
+                raise ValueError("Dataset is empty!")
+        except Exception as e:
+            if verbose:
+                print(f"\nValidation failed:")
+                print(f"   {str(e)}")
+                print("=" * 60 + "\n")
+            raise
+        
+        # Check batch consistency
+        if len(last_batch_sizes) > 1 and len(set(last_batch_sizes[:-1])) > 1:
+            if verbose:
+                print(f"\nWarning: Batch sizes vary: {last_batch_sizes}")
+        
+        if verbose:
+            print("=" * 60)
+            print(f"Dataset validation passed! ({batch_count} batches sampled)")
+            print("=" * 60 + "\n")
+        
+        return True
