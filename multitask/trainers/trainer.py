@@ -136,25 +136,61 @@ class Trainer:
                 if task_type == 'binary':
                     # Binary classification: single output with sigmoid
                     loss_val = tf.keras.losses.binary_crossentropy(y_task_true, y_task_pred)
+                    
+                    # Apply class weights
+                    class_weight_0 = class_weights[task_idx].get(0, 1.0)
+                    class_weight_1 = class_weights[task_idx].get(1, 1.0)
+                    
+                    # Create per-sample class weights based on true labels
+                    sample_class_weights = tf.where(
+                        tf.equal(y_task_true, 0),
+                        class_weight_0,
+                        class_weight_1
+                    )
+                    loss_val = loss_val * sample_class_weights
+                    
                 elif task_type == 'multiclass':
                     # Multiclass: convert true labels to one-hot if needed
                     y_task_true_valid = tf.cast(y_task_true, tf.int32)
-                    loss_val = tf.nn.sparse_softmax_cross_entropy_with_logits(
-                        labels=y_task_true_valid,
-                        logits=y_task_pred
-                    ) if y_task_pred.shape[-1] > 1 else tf.keras.losses.sparse_categorical_crossentropy(
+                    loss_val = tf.keras.losses.sparse_categorical_crossentropy(
                         y_task_true, y_task_pred, from_logits=False
                     )
+                    
+                    # Apply class weights based on true class
+                    num_classes = self.model.config.get_num_classes(task_idx)
+                    sample_class_weights = tf.zeros_like(y_task_true, dtype=tf.float32)
+                    for class_idx in range(num_classes):
+                        class_weight = class_weights[task_idx].get(class_idx, 1.0)
+                        sample_class_weights = tf.where(
+                            tf.equal(y_task_true_valid, class_idx),
+                            class_weight,
+                            sample_class_weights
+                        )
+                    loss_val = loss_val * sample_class_weights
+                    
                 elif task_type == 'multilabel':
                     # Multilabel: binary crossentropy on each class
                     loss_val = tf.keras.losses.binary_crossentropy(y_task_true, y_task_pred)
+                    
+                    # Apply class weights (per class, binary)
+                    class_weight_0 = class_weights[task_idx].get(0, 1.0)
+                    class_weight_1 = class_weights[task_idx].get(1, 1.0)
+                    
+                    # For multilabel, apply weights per class
+                    sample_class_weights = tf.where(
+                        tf.equal(y_task_true, 0),
+                        class_weight_0,
+                        class_weight_1
+                    )
+                    loss_val = loss_val * sample_class_weights
+                    
                 else:
                     raise ValueError(f"Unknown task_type: {task_type}")
                 
-                # Apply mask
+                # Apply mask (exclude masked labels from loss)
                 masked_loss = loss_val * mask
                 
-                # Apply task weight
+                # Apply task weight (ν_k from paper)
                 weighted_loss = masked_loss * task_weights[task_idx]
                 
                 total_loss += tf.reduce_sum(weighted_loss)
@@ -319,6 +355,136 @@ class Trainer:
         
         return thresholds, f1_scores
     
+    def _compute_task_weights(
+        self,
+        dataset: tf.data.Dataset,
+        num_samples_to_check: int = 10000
+    ) -> List[float]:
+        """Compute task weights inversely proportional to non-masked sample count.
+        
+        Implements: ν_k ~ 1/|D_k| where D_k is the set of non-masked samples for task k.
+        
+        Args:
+            dataset: Training dataset to compute weights from
+            num_samples_to_check: Max number of samples to scan
+            
+        Returns:
+            List of task weights (one per task)
+        """
+        task_names = self.model.task_names or [f'task_{i}' for i in range(self.model.config.total_outputs)]
+        task_sample_counts = {name: 0 for name in task_names}
+        total_samples = 0
+        
+        # Count non-masked samples per task
+        for inputs, labels_dict in dataset.take(num_samples_to_check):
+            batch_size = tf.shape(list(labels_dict.values())[0])[0].numpy()
+            total_samples += batch_size
+            
+            for task_name in task_names:
+                labels = labels_dict[task_name]
+                # Count non-masked samples (not equal to -1)
+                non_masked = tf.reduce_sum(tf.cast(tf.not_equal(labels, -1), tf.int32)).numpy()
+                task_sample_counts[task_name] += non_masked
+            
+            if total_samples >= num_samples_to_check:
+                break
+        
+        # Compute weights as inverse of sample counts, normalized
+        task_weights = []
+        for task_name in sorted(task_names):
+            count = max(task_sample_counts[task_name], 1)  # Avoid division by zero
+            task_weights.append(1.0 / count)
+        
+        # Normalize so weights sum to number of tasks (maintains scale)
+        total_weight = sum(task_weights)
+        task_weights = [w * len(task_weights) / total_weight for w in task_weights]
+        
+        return task_weights
+    
+    def _compute_class_weights(
+        self,
+        dataset: tf.data.Dataset,
+        num_samples_to_check: int = 10000
+    ) -> List[Dict[int, float]]:
+        """Compute per-task class weights inversely proportional to class frequency.
+        
+        Implements: w_k^c proportional to inverse enrichment of class c in task k.
+        
+        Args:
+            dataset: Training dataset to compute weights from
+            num_samples_to_check: Max number of samples to scan
+            
+        Returns:
+            List of dicts mapping class index to weight (one dict per task)
+        """
+        task_names = self.model.task_names or [f'task_{i}' for i in range(self.model.config.total_outputs)]
+        
+        # Collect labels for each task
+        task_labels = {name: [] for name in task_names}
+        total_samples = 0
+        
+        for inputs, labels_dict in dataset.take(num_samples_to_check):
+            batch_size = tf.shape(list(labels_dict.values())[0])[0].numpy()
+            total_samples += batch_size
+            
+            for task_idx, task_name in enumerate(sorted(task_names)):
+                labels = labels_dict[task_name].numpy()
+                task_type = self.model.config.get_task_type(task_idx)
+                
+                # Flatten and filter out masked values
+                if len(labels.shape) > 1:
+                    labels = labels.flatten()
+                valid_labels = labels[labels != -1]
+                
+                if len(valid_labels) > 0:
+                    task_labels[task_name].extend(valid_labels.tolist())
+            
+            if total_samples >= num_samples_to_check:
+                break
+        
+        # Compute class weights for each task
+        class_weights_list = []
+        for task_idx, task_name in enumerate(sorted(task_names)):
+            labels = np.array(task_labels[task_name])
+            task_type = self.model.config.get_task_type(task_idx)
+            num_classes = self.model.config.get_num_classes(task_idx)
+            
+            if len(labels) == 0:
+                # No valid labels - use uniform weights
+                if task_type == 'binary':
+                    class_weights_list.append({0: 1.0, 1: 1.0})
+                else:
+                    class_weights_list.append({i: 1.0 for i in range(num_classes)})
+                continue
+            
+            # Count class frequencies
+            if task_type == 'binary':
+                class_counts = np.bincount(labels.astype(int), minlength=2)
+                if len(class_counts) < 2:
+                    class_counts = np.array([class_counts[0] if len(class_counts) > 0 else 0, 0])
+            elif task_type == 'multiclass':
+                class_counts = np.bincount(labels.astype(int), minlength=num_classes)
+            elif task_type == 'multilabel':
+                # For multilabel, treat each class independently (binary per class)
+                class_counts = np.bincount(labels.astype(int), minlength=2)
+                if len(class_counts) < 2:
+                    class_counts = np.array([class_counts[0] if len(class_counts) > 0 else 0, 0])
+            
+            # Compute weights as inverse frequency
+            class_weights = {}
+            for class_idx in range(len(class_counts)):
+                count = class_counts[class_idx]
+                if count == 0:
+                    # Class not present - use very small weight to avoid division by zero
+                    class_weights[class_idx] = 0.001
+                else:
+                    # Inverse frequency
+                    class_weights[class_idx] = len(labels) / (len(class_counts) * count)
+            
+            class_weights_list.append(class_weights)
+        
+        return class_weights_list
+    
     def fit(
         self,
         train_dataset: tf.data.Dataset,
@@ -361,14 +527,15 @@ class Trainer:
         with self.strategy.scope():
             # Build or use custom loss function
             # This function encapsulates true multi-task learning: computing and combining
-            # individual task losses
+            # individual task losses with automatic task and class weighting
             if self.custom_loss_fn is not None:
                 loss_fn = self.custom_loss_fn
             else:
                 loss_fn = self._build_loss_function(
                     num_tasks=num_tasks,
                     class_weights=class_weights,
-                    task_weights=task_weights
+                    task_weights=task_weights,
+                    train_dataset=train_dataset
                 )
             
             # Determine steps per epoch
