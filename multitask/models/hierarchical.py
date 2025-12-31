@@ -16,14 +16,15 @@ class MultiTaskModel(tf.keras.Model):
     This model supports arbitrary hierarchical task structures where each branch
     can have a different number of children. The architecture consists of:
     
-    1. Optional encoder (BERT, etc.) or pre-computed embeddings
+    1. Optional encoder (TensorFlow Hub, HuggingFace, or custom) or pre-computed embeddings
     2. Optional shared layers (common to all tasks)
     3. Hierarchical branching layers (configurable depth and branching factor)
     4. Output layers (one per final task)
     
     Args:
         config: ModelConfig object defining the architecture
-        encoder: Optional encoder (TensorFlow Hub URL or Keras layer)
+        encoder: Optional encoder - TensorFlow Hub URL (https://tfhub.dev/...),
+                 HuggingFace model name (e.g., 'bert-base-uncased'), or custom Keras layer
         trainable_encoder: Whether encoder weights are trainable
         embedding_dim: If using embeddings, their dimension
         num_classes: Number of classes per task (default: 2 for binary)
@@ -31,12 +32,12 @@ class MultiTaskModel(tf.keras.Model):
         name: Optional model name
     
     Example:
-        >>> config = ModelConfig(
-        ...     task_structure=[[3], [2, 5, 3]],  # 3 branches -> 2,5,3 children
-        ...     shared_layer_sizes=[256, 128],
-        ...     default_layer_sizes=[128, 64]
-        ... )
-        >>> model = MultiTaskModel(config=config, encoder='https://tfhub.dev/...')
+        >>> # Using TensorFlow Hub
+        >>> config = ModelConfig(task_structure=[[2]])
+        >>> model = MultiTaskModel(config=config, encoder='https://tfhub.dev/tensorflow/bert_en_uncased_L-12_H-768_A-12/4')
+        >>> 
+        >>> # Using HuggingFace
+        >>> model = MultiTaskModel(config=config, encoder='bert-base-uncased')
     """
     
     def __init__(
@@ -87,17 +88,34 @@ class MultiTaskModel(tf.keras.Model):
         """Build the encoder component.
         
         Args:
-            encoder: Either a TensorFlow Hub URL, a Keras layer, or None for embedding input
+            encoder: Either a TensorFlow Hub URL, HuggingFace model name, a Keras layer, or None for embedding input
             trainable_encoder: Whether encoder weights should be trainable
             embedding_dim: If using pre-computed embeddings, the dimension size
         """
         if encoder is not None:
-            # Using a pre-trained encoder (e.g., BERT from TensorFlow Hub)
+            # Using a pre-trained encoder
             if isinstance(encoder, str):
-                import tensorflow_hub as hub
-                self.encoder = hub.KerasLayer(encoder, trainable=trainable_encoder, name='encoder')
+                if encoder.startswith('https://tfhub.dev/'):
+                    # TensorFlow Hub model
+                    import tensorflow_hub as hub
+                    self.encoder = hub.KerasLayer(encoder, trainable=trainable_encoder, name='encoder')
+                    self.encoder_type = 'tfhub'
+                else:
+                    # HuggingFace model (e.g., 'bert-base-uncased', 'roberta-large')
+                    try:
+                        from transformers import TFAutoModel
+                    except ImportError:
+                        raise ImportError(
+                            "HuggingFace transformers library is required for this encoder. "
+                            "Install with: pip install transformers>=4.30.0 or pip install multitask[huggingface]"
+                        )
+                    self.encoder = TFAutoModel.from_pretrained(encoder, name='encoder')
+                    self.encoder.trainable = trainable_encoder
+                    self.encoder_type = 'huggingface'
             else:
+                # Custom Keras layer
                 self.encoder = encoder
+                self.encoder_type = 'custom'
             self.uses_encoder = True
             self.embedding_dim = None
         else:
@@ -105,6 +123,7 @@ class MultiTaskModel(tf.keras.Model):
             if embedding_dim is None:
                 raise ValueError("Must specify embedding_dim when not using an encoder")
             self.encoder = None
+            self.encoder_type = None
             self.uses_encoder = False
             self.embedding_dim = embedding_dim
     
@@ -120,10 +139,24 @@ class MultiTaskModel(tf.keras.Model):
         """
         if self.uses_encoder:
             encoder_output = self.encoder(inputs, training=training)
+            
             # Handle different encoder output formats
-            if isinstance(encoder_output, dict):
+            if self.encoder_type == 'huggingface':
+                # HuggingFace models return objects with attributes
+                if hasattr(encoder_output, 'pooler_output') and encoder_output.pooler_output is not None:
+                    return encoder_output.pooler_output
+                elif hasattr(encoder_output, 'last_hidden_state'):
+                    # Use [CLS] token (first token) if no pooler
+                    return encoder_output.last_hidden_state[:, 0, :]
+                else:
+                    # Fallback to first element if it's a tuple/list
+                    return encoder_output[0] if isinstance(encoder_output, (tuple, list)) else encoder_output
+            elif isinstance(encoder_output, dict):
+                # TF Hub dict format
                 return encoder_output.get('pooled_output', encoder_output.get('default', encoder_output))
-            return encoder_output
+            else:
+                # Direct tensor output
+                return encoder_output
         else:
             # Already embeddings, just pass through
             return inputs
