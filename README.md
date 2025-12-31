@@ -112,7 +112,7 @@ data = pd.DataFrame({
 })
 ```
 
-See [DATA_FORMAT.md](DATA_FORMAT.md) for complete documentation.
+See [DATA_FORMAT.md](docs/DATA_FORMAT.md) for complete documentation.
 
 ## Encoder Types
 
@@ -148,7 +148,7 @@ config = ModelConfig(
 )
 ```
 
-See [ENCODER_SUPPORT.md](ENCODER_SUPPORT.md) for all options.
+See [ENCODER_SUPPORT.md](docs/ENCODER_SUPPORT.md) for all options.
 
 ## Training
 
@@ -204,7 +204,7 @@ with strategy.scope():
 trainer.fit(train_data, val_data)
 ```
 
-See [DISTRIBUTED_TRAINING.md](DISTRIBUTED_TRAINING.md).
+See [DISTRIBUTED_TRAINING.md](docs/DISTRIBUTED_TRAINING.md).
 
 ### Checkpointing
 
@@ -241,7 +241,7 @@ model, thresholds = load_model('models/my_model')
 predictions = model.predict(test_data)
 ```
 
-See [MODEL_PERSISTENCE.md](MODEL_PERSISTENCE.md).
+See [MODEL_PERSISTENCE.md](docs/MODEL_PERSISTENCE.md).
 
 ## Configuration
 
