@@ -71,8 +71,8 @@ class Trainer:
     def _build_loss_function(
         self,
         num_tasks: int,
-        class_weights: Optional[List[Dict[int, float]]] = None,
-        task_weights: Optional[List[float]] = None,
+        class_weights: List[Dict[int, float]],
+        task_weights: List[float],
         mask_value: int = -1
     ) -> Callable:
         """Build multi-task loss function with task-specific losses.
@@ -90,23 +90,24 @@ class Trainer:
         both loss computation and normalization, enabling handling of missing labels.
         
         Task weighting: Each task can have importance weight applied to its loss,
-        allowing prioritization of certain tasks during training.
+        allowing prioritization of certain tasks during training. Weights are
+        automatically computed based on task sample sizes (inversely proportional).
+        
+        Class weighting: Each class within a task can have importance weight applied,
+        handling class imbalance. Weights are automatically computed based on class
+        frequencies (inversely proportional).
         
         Args:
             num_tasks: Total number of output tasks
             class_weights: Per-task class weights, list of {0: weight, 1: weight} dicts
-            task_weights: Relative importance weights for each task (default: all 1.0)
+                          (automatically computed in fit() if not provided by user)
+            task_weights: Relative importance weights for each task
+                         (automatically computed in fit() if not provided by user)
             mask_value: Value indicating missing labels to be excluded (default: -1)
             
         Returns:
             Loss function that takes (y_true_dict, y_pred_dict) and returns scalar loss
         """
-        if class_weights is None:
-            class_weights = [{0: 1.0, 1: 1.0} for _ in range(num_tasks)]
-        
-        if task_weights is None:
-            task_weights = [1.0] * num_tasks
-        
         def dict_weighted_masked_loss(y_true_dict, y_pred_dict):
             """Compute multi-task loss combining individual task losses.
             
@@ -513,14 +514,22 @@ class Trainer:
         The multi-task loss function computes individual losses for each task,
         applies masking and weighting, and combines them for joint optimization.
         
+        Weights are automatically computed from training data if not provided:
+        - Task weights: inversely proportional to non-masked sample count per task
+        - Class weights: inversely proportional to class frequency within each task
+        
         Args:
             train_dataset: Training TensorFlow Dataset yielding (inputs, labels_dict)
             val_dataset: Validation TensorFlow Dataset yielding (inputs, labels_dict)
             num_tasks: Total number of output tasks
             steps_per_epoch: Number of steps per epoch (auto-calculated if None)
             validation_steps: Number of validation steps (auto-calculated if None)
-            class_weights: Optional per-task class weights for loss function
-            task_weights: Optional task importance weights for relative task prioritization
+            class_weights: Optional per-task class weights for loss function.
+                          If None, automatically computed from training data using
+                          inverse class frequency weighting.
+            task_weights: Optional task importance weights for relative task prioritization.
+                         If None, automatically computed from training data using
+                         inverse sample count weighting.
             callbacks: Additional Keras callbacks
             optimize_thresholds: Whether to find optimal classification thresholds
                                 on validation data (only for binary/multilabel tasks).
@@ -558,11 +567,21 @@ class Trainer:
             if self.custom_loss_fn is not None:
                 loss_fn = self.custom_loss_fn
             else:
+                # Automatically compute weights if not provided
+                if class_weights is None:
+                    print("Computing class weights from training data...")
+                    class_weights = self._compute_class_weights(train_dataset)
+                    print(f"Computed class weights for {len(class_weights)} tasks")
+                
+                if task_weights is None:
+                    print("Computing task weights from training data...")
+                    task_weights = self._compute_task_weights(train_dataset)
+                    print(f"Task weights: {[f'{w:.3f}' for w in task_weights]}")
+                
                 loss_fn = self._build_loss_function(
                     num_tasks=num_tasks,
                     class_weights=class_weights,
-                    task_weights=task_weights,
-                    train_dataset=train_dataset
+                    task_weights=task_weights
                 )
             
             # Determine steps per epoch
