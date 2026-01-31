@@ -22,7 +22,7 @@ class TrainingConfig:
     warmup_percent: int = 5
     
     # Model hyperparameters
-    dropout: float = 0.1
+    dropout_rate: float = 0.1
     
     # Sequence/data parameters
     max_sequence_length: int = 512
@@ -51,8 +51,8 @@ class TrainingConfig:
             raise ValueError("batch_size must be at least 1")
         if self.learning_rate <= 0:
             raise ValueError("learning_rate must be positive")
-        if not 0 <= self.dropout < 1:
-            raise ValueError("dropout must be in range [0, 1)")
+        if not 0 <= self.dropout_rate < 1:
+            raise ValueError("dropout_rate must be in range [0, 1)")
         if self.max_sequence_length > 512:
             raise ValueError("max_sequence_length cannot exceed 512 for BERT-based models")
 
@@ -87,6 +87,8 @@ class ModelConfig:
     
     Layer sizes can be specified per branch level, or use defaults for all levels.
     """
+    # Model hyperparameters
+    dropout_rate: float = 0.1
     
     # Task structure: nested list defining branching hierarchy
     # Format: [[n_initial], [n_children_0, n_children_1, ...], [...], ...]

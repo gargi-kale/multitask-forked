@@ -47,18 +47,18 @@ class MultiTaskModel(tf.keras.Model):
         trainable_encoder: bool = True,
         embedding_dim: Optional[int] = None,
         num_classes: int = 2,
-        dropout: Optional[float] = None,
+        dropout_rate: Optional[float] = None,
         name: Optional[str] = None,
         **kwargs
     ):
         # Use dropout from config if not explicitly provided
-        dropout = dropout if dropout is not None else 0.1
+        dropout_rate = dropout_rate if dropout_rate is not None else 0.1
         
         super().__init__(name=name or "MultiTaskModel", **kwargs)
         
         self.config = config
         self.num_classes = num_classes
-        self.dropout_rate = dropout
+        self.dropout_rate = dropout_rate
         self.task_names = config.task_names
         
         # Validate configuration
@@ -77,7 +77,7 @@ class MultiTaskModel(tf.keras.Model):
         if self.num_classes < 2:
             raise ValueError("num_classes must be at least 2")
         if not 0 <= self.dropout_rate < 1:
-            raise ValueError("dropout must be in range [0, 1)")
+            raise ValueError("dropout_rate must be in range [0, 1)")
     
     def _build_encoder(
         self,
