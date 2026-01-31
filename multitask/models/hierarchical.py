@@ -68,6 +68,10 @@ class MultiTaskModel(tf.keras.Model):
         
         # Validate configuration
         self._validate_config()
+
+        # Default to passed in encoder. Otherwise use config encoder.
+        if encoder is None:
+            encoder = self.config.encoder_name
         
         # Build encoder
         self._build_encoder(encoder, trainable_encoder, embedding_dim)

@@ -128,6 +128,10 @@ class ModelConfig:
     # Must be a list of length equal to total_tasks
     # Example: [2, 2, 5, 2, 2, 3, 2, 2, 2, 2] for 10 tasks (some binary, some multiclass)
     num_classes_per_task: Optional[List[int]] = None
+
+    # Encoder specifications
+    encoder_type: Optional[str] = None
+    encoder_name: Optional[str] = None
     
     def __post_init__(self):
         """Validate configuration after initialization."""
