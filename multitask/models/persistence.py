@@ -10,6 +10,46 @@ from ..config import ModelConfig
 from .hierarchical import MultiTaskModel
 
 
+def _get_build_dummy_input(model: MultiTaskModel, metadata: dict):
+    """Build a dummy input suitable for building the model (one forward pass) before loading weights.
+
+    Chooses input format based on encoder type so that model(dummy_input) succeeds:
+    - No encoder: pre-computed embeddings, shape (1, embedding_dim)
+    - HuggingFace: dict with input_ids, attention_mask, token_type_ids, each (1, 128)
+    - TF Hub Universal Sentence Encoder: string tensor
+    - TF Hub BERT-style: dict with input_word_ids, input_mask, input_type_ids
+    - Custom encoder: string tensor (common default; user may need to provide encoder if this fails)
+
+    Args:
+        model: MultiTaskModel instance (uses_encoder, encoder_type set).
+        metadata: Saved metadata dict (encoder_identifier, embedding_dim).
+
+    Returns:
+        Dummy input (Tensor or dict of Tensors) for model(dummy_input, training=False).
+    """
+    if model.uses_encoder:
+        if model.encoder_type == 'huggingface':
+            return {
+                'input_ids': tf.zeros((1, 128), dtype=tf.int32),
+                'attention_mask': tf.ones((1, 128), dtype=tf.int32),
+                'token_type_ids': tf.zeros((1, 128), dtype=tf.int32),
+            }
+        elif model.encoder_type == 'tfhub':
+            encoder_identifier = metadata.get('encoder_identifier', '')
+            if encoder_identifier and 'universal-sentence-encoder' in encoder_identifier.lower():
+                return tf.constant(["dummy text for model building"], dtype=tf.string)
+            else:
+                return {
+                    'input_word_ids': tf.zeros((1, 128), dtype=tf.int32),
+                    'input_mask': tf.ones((1, 128), dtype=tf.int32),
+                    'input_type_ids': tf.zeros((1, 128), dtype=tf.int32),
+                }
+        else:  # custom encoder
+            return tf.constant(["dummy text for model building"], dtype=tf.string)
+    else:
+        return tf.zeros((1, metadata['embedding_dim']))
+
+
 def load_model(
     filepath: str,
     encoder: Optional[Union[str, tf.keras.layers.Layer]] = None
@@ -89,23 +129,7 @@ def load_model(
     )
     
     # Build model by calling it once (required before loading weights)
-    # Create dummy input to infer shapes
-    if model.uses_encoder:
-        if model.encoder_type == 'huggingface':
-            dummy_input = {
-                'input_ids': tf.zeros((1, 128), dtype=tf.int32),
-                'attention_mask': tf.ones((1, 128), dtype=tf.int32),
-                'token_type_ids': tf.zeros((1, 128), dtype=tf.int32),
-            }
-        else:  # tfhub or custom
-            dummy_input = {
-                'input_word_ids': tf.zeros((1, 128), dtype=tf.int32),
-                'input_mask': tf.ones((1, 128), dtype=tf.int32),
-                'input_type_ids': tf.zeros((1, 128), dtype=tf.int32),
-            }
-    else:
-        dummy_input = tf.zeros((1, metadata['embedding_dim']))
-    
+    dummy_input = _get_build_dummy_input(model, metadata)
     _ = model(dummy_input, training=False)
     
     # Load weights
