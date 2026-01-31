@@ -46,7 +46,7 @@ class MultiTaskModel(tf.keras.Model):
         encoder: Optional[Union[str, tf.keras.layers.Layer]] = None,
         trainable_encoder: bool = True,
         embedding_dim: Optional[int] = None,
-        num_classes: int = 2,
+        num_classes: Optional[List[int]] = None,
         dropout_rate: Optional[float] = None,
         name: Optional[str] = None,
         **kwargs
@@ -57,7 +57,18 @@ class MultiTaskModel(tf.keras.Model):
         super().__init__(name=name or "MultiTaskModel", **kwargs)
         
         self.config = config
-        self.num_classes = num_classes
+        
+        # self.config provides default values for the number of classes per task as
+        # a list of integers. Users can override defaults by passing arguments directly.
+        # If neither is provided, use a default of 2.
+        # Priority is num_classes > self.config.num_classes_per_task > 2 (default)
+        if not num_classes and not self.config.num_classes_per_task:
+            self.num_classes = [2] * self.config.total_outputs
+        elif num_classes is not None:
+            self.num_classes = num_classes
+        else:
+            self.num_classes = self.config.num_classes_per_task
+
         self.dropout_rate = dropout_rate
         self.task_names = config.task_names
         
@@ -74,7 +85,7 @@ class MultiTaskModel(tf.keras.Model):
     
     def _validate_config(self):
         """Validate model configuration."""
-        if self.num_classes < 2:
+        if any(x < 2 for x in self.num_classes):
             raise ValueError("num_classes must be at least 2")
         if not 0 <= self.dropout_rate < 1:
             raise ValueError("dropout_rate must be in range [0, 1)")
@@ -118,6 +129,7 @@ class MultiTaskModel(tf.keras.Model):
             else:
                 # Custom Keras layer
                 self.encoder = encoder
+                self.encoder.trainable = trainable_encoder
                 self.encoder_type = 'custom'
                 self._encoder_identifier = None
             self.uses_encoder = True
@@ -787,7 +799,7 @@ class MultiTaskModel(tf.keras.Model):
         config_dict = {
             'task_structure': self.config.task_structure,
             'task_types': self.config.task_types,
-            'num_classes_per_task': self.config.num_classes_per_task,
+            'num_classes_per_task': self.num_classes,
             'task_names': self.config.task_names,
             'shared_layer_sizes': self.config.shared_layer_sizes,
             'branch_layer_sizes': self.config.branch_layer_sizes,
