@@ -159,3 +159,7 @@ results/
 # Except config in the package
 !multitask/**/*.yaml
 !multitask/**/*.json
+
+outputs/
+test_spider_persistence/
+tfhub_cache/

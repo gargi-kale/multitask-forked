@@ -119,8 +119,9 @@ class Trainer:
             
             Final loss is averaged over all valid (non-masked) samples.
             """
-            total_loss = 0.0
-            num_valid_samples = 0
+            # fix: explicit dtype for tf.constant
+            total_loss = tf.constant(0.0, dtype=tf.float32)
+            num_valid_samples = tf.constant(0.0, dtype=tf.float32)
             
             # Get task names from y_true_dict (should match y_pred_dict)
             task_names = sorted(y_true_dict.keys())
@@ -134,6 +135,7 @@ class Trainer:
                 
                 # Create mask for valid labels
                 mask = tf.cast(tf.not_equal(y_task_true, mask_value), tf.float32)
+                mask = tf.reshape(mask, [-1])
                 
                 # Compute appropriate loss based on task type
                 if task_type == 'binary':
@@ -141,16 +143,16 @@ class Trainer:
                     loss_val = tf.keras.losses.binary_crossentropy(y_task_true, y_task_pred)
                     
                     # Apply class weights
-                    class_weight_0 = class_weights[task_idx].get(0, 1.0)
-                    class_weight_1 = class_weights[task_idx].get(1, 1.0)
+                    class_weight_0 = tf.cast(class_weights[task_idx].get(0, 1.0), tf.float32)
+                    class_weight_1 = tf.cast(class_weights[task_idx].get(1, 1.0), tf.float32)
                     
                     # Create per-sample class weights based on true labels
-                    sample_class_weights = tf.where(
+                    sample_class_weights = tf.reshape(tf.where(
                         tf.equal(y_task_true, 0),
-                        class_weight_0,
-                        class_weight_1
-                    )
-                    loss_val = loss_val * sample_class_weights
+                        class_weight_0, 
+                        class_weight_1), [-1])
+                    
+                    loss_val = tf.reshape(loss_val, [-1]) * sample_class_weights
                     
                 elif task_type == 'multiclass':
                     # Multiclass: convert true labels to one-hot if needed
@@ -161,11 +163,12 @@ class Trainer:
                     
                     # Apply class weights based on true class
                     num_classes = self.model.config.get_num_classes(task_idx)
-                    sample_class_weights = tf.zeros_like(y_task_true, dtype=tf.float32)
+                    # fix: loss_val instead of y_task_true
+                    sample_class_weights = tf.zeros_like(loss_val, dtype=tf.float32)
                     for class_idx in range(num_classes):
-                        class_weight = class_weights[task_idx].get(class_idx, 1.0)
+                        class_weight = tf.cast(class_weights[task_idx].get(class_idx, 1.0), tf.float32)
                         sample_class_weights = tf.where(
-                            tf.equal(y_task_true_valid, class_idx),
+                            tf.equal(tf.reshape(y_task_true_valid, [-1]), class_idx),
                             class_weight,
                             sample_class_weights
                         )
@@ -174,27 +177,34 @@ class Trainer:
                 elif task_type == 'multilabel':
                     # Multilabel: binary crossentropy on each class
                     loss_val = tf.keras.losses.binary_crossentropy(y_task_true, y_task_pred)
-                    
+            
+                    y_task_true_int = tf.cast(y_task_true, tf.int32)
                     # Apply class weights (per class, binary)
-                    class_weight_0 = class_weights[task_idx].get(0, 1.0)
-                    class_weight_1 = class_weights[task_idx].get(1, 1.0)
+                    # FIX: Explicitly cast weights to float32 to prevent Dtype Mismatch
+                    class_weight_0 = tf.cast(class_weights[task_idx].get(0, 1.0), tf.float32)
+                    class_weight_1 = tf.cast(class_weights[task_idx].get(1, 1.0), tf.float32)
                     
                     # For multilabel, apply weights per class
                     sample_class_weights = tf.where(
-                        tf.equal(y_task_true, 0),
+                        tf.equal(y_task_true_int, 0),
                         class_weight_0,
                         class_weight_1
                     )
-                    loss_val = loss_val * sample_class_weights
+                    # weighted_loss_by_class = loss_val * sample_class_weights
+                    # loss_val = tf.reduce_mean(weighted_loss_by_class, axis=-1)
+                    class_mask = tf.cast(tf.not_equal(y_task_true, mask_value), tf.float32)
+                    loss_val = tf.reduce_mean(loss_val * sample_class_weights * class_mask, axis=-1)
                     
                 else:
                     raise ValueError(f"Unknown task_type: {task_type}")
                 
                 # Apply mask (exclude masked labels from loss)
+                loss_val = tf.reshape(tf.cast(loss_val, tf.float32), [-1])
                 masked_loss = loss_val * mask
                 
                 # Apply task weight (ν_k from paper)
-                weighted_loss = masked_loss * task_weights[task_idx]
+                task_weight = tf.cast(task_weights[task_idx], tf.float32)
+                weighted_loss = masked_loss * task_weight
                 
                 total_loss += tf.reduce_sum(weighted_loss)
                 num_valid_samples += tf.reduce_sum(mask)
