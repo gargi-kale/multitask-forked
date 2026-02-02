@@ -12,8 +12,7 @@ from .hierarchical import MultiTaskModel
 
 def load_model(
     filepath: str,
-    encoder: Optional[Union[str, tf.keras.layers.Layer]] = None,
-    custom_objects: Optional[dict] = None
+    encoder: Optional[Union[str, tf.keras.layers.Layer]] = None
 ) -> tuple[MultiTaskModel, Optional[Dict[str, Optional[float]]]]:
     """Load a saved MultiTaskModel from disk.
     
@@ -26,7 +25,6 @@ def load_model(
         filepath: Directory path containing saved model artifacts
         encoder: Optional encoder override. If provided, uses this instead of saved encoder.
                  Useful for custom layers not serializable or updating encoder versions.
-        custom_objects: Optional dict of custom objects for deserialization
         
     Returns:
         Tuple of (model, thresholds_dict or None)
@@ -87,8 +85,7 @@ def load_model(
         config=model_config,
         encoder=encoder,
         embedding_dim=metadata.get('embedding_dim'),
-        dropout_rate=metadata.get('dropout_rate', 0.3),
-        custom_objects=custom_objects
+        dropout_rate=metadata.get('dropout_rate', 0.3)
     )
     
     # Build model by calling it once (required before loading weights)
