@@ -829,3 +829,21 @@ class MultiTaskModel(tf.keras.Model):
         print(f"  - Weights: {weights_path}")
         print(f"  - Config: {os.path.join(filepath, 'config.json')}")
         print(f"  - Metadata: {os.path.join(filepath, 'metadata.json')}")
+        
+    def load_task_weights(self, weights_path: str):
+        """
+        User-friendly weight loader. 
+        Verifies that weights match the hierarchical structure.
+        """
+        try:
+            status = self.load_weights(weights_path).expect_partial()
+            status.assert_existing_objects_matched()
+            print(f"Successfully validated and loaded weights from {weights_path}")
+        # Catching the base OpError ensures that low-level C++ errors like 
+        # 'sstable' or 'tensor slice' issues are wrapped in our friendly message.
+        except (tf.errors.OpError, tf.errors.DataLossError, AssertionError, ValueError) as e:
+            raise ValueError(
+                "Model architecture mismatch: The weights file you are trying to load "
+                "does not match the 'task_structure' defined in your current ModelConfig. "
+                "Ensure you are using the same hierarchy used during training."
+            ) from e

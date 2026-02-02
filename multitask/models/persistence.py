@@ -87,8 +87,8 @@ def load_model(
         config=model_config,
         encoder=encoder,
         embedding_dim=metadata.get('embedding_dim'),
-        dropout_rate=metadata.get('dropout_rate', 0.3),
-        custom_objects=custom_objects
+        dropout=metadata.get('dropout_rate', 0.3), # Eddie: change from dropout_rate to dropout
+        # custom_objects=custom_objects # Eddie: removed bc MultiTaskModel doesn't use this
     )
     
     # Build model by calling it once (required before loading weights)
@@ -113,10 +113,14 @@ def load_model(
     
     # Load weights
     weights_path = os.path.join(filepath, 'weights')
-    if os.path.exists(weights_path):
-        model.load_weights(weights_path)
-    elif os.path.exists(weights_path + '.h5'):
-        model.load_weights(weights_path + '.h5')
+    # check for .index file or the exact path or .h5
+    has_index = os.path.exists(weights_path + '.index')
+    has_direct = os.path.exists(weights_path)
+    has_h5 = os.path.exists(weights_path + '.h5')
+    
+    if has_index or has_direct or has_h5:
+        # use the new wrapper to ensure the file is valid for this model
+        model.load_task_weights(weights_path)
     else:
         raise ValueError(f"Weights file not found: {weights_path}")
     
