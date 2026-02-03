@@ -18,7 +18,7 @@ def dummy_trainer():
     
     # 2. Initialize Model (Trainer needs this to know output shapes)
     # Assuming standard encoder_dim, e.g., 768 for BERT
-    model = MultiTaskModel(config=config, encoder_dim=768)
+    model = MultiTaskModel(config=config, embedding_dim=768)
     
     # 3. Initialize Trainer
     train_config = TrainingConfig()
