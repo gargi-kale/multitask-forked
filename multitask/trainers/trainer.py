@@ -70,13 +70,9 @@ class Trainer:
         
     def _route_inputs(self, y_true: Union[tf.Tensor, Dict], y_pred: Dict) -> Tuple[Dict, Dict]:
         """
-<<<<<<< HEAD
         Add a shape-aware routing helper, which allows the trainer to accept concatenated tensors
         from the data loader and slice them into task-named dicts.
         
-=======
-        Add a shapeaware routing helper, which converts concatenated tensors to task-named dicts.
->>>>>>> 1e4dba2b471c9d6a94e5ceef8e983820dc028337
         """
         if isinstance(y_true, dict):
             return y_true, y_pred
@@ -87,12 +83,8 @@ class Trainer:
         # Iterate through task metadata to slice the input tensor
         for task_idx in range(self.model.config.total_outputs):
             task_name = self.model.task_names[task_idx] if self.model.task_names else f'task_{task_idx}'
-<<<<<<< HEAD
             real_idx = list(self.model.config.task_names).index(task_name)
             task_type = self.model.config.get_task_type(real_idx)
-=======
-            task_type = self.model.config.get_task_type(task_idx)
->>>>>>> 1e4dba2b471c9d6a94e5ceef8e983820dc028337
             
             if task_type in ['binary', 'multiclass']:
                 num_cols = 1
@@ -157,14 +149,9 @@ class Trainer:
             
             Final loss is averaged over all valid (non-masked) samples.
             """
-<<<<<<< HEAD
             # dynamic route inputs
             y_true_dict, y_pred_dict = self._route_inputs(y_true_dict, y_pred_dict)
             
-=======
-            y_true_dict, y_pred_dict = self._route_inputs(y_true_dict, y_pred_dict)
-            # fix: explicit dtype for tf.constant
->>>>>>> 1e4dba2b471c9d6a94e5ceef8e983820dc028337
             total_loss = tf.constant(0.0, dtype=tf.float32)
             num_valid_samples = tf.constant(0.0, dtype=tf.float32)
             
@@ -199,7 +186,6 @@ class Trainer:
                     loss_val = tf.reshape(loss_val, [-1]) * sample_class_weights
                     
                 elif task_type == 'multiclass':
-<<<<<<< HEAD
                     y_task_true = tf.cast(tf.reshape(y_task_true, [-1]), tf.int32)
                     
                     loss_val = tf.keras.losses.sparse_categorical_crossentropy(
@@ -213,17 +199,6 @@ class Trainer:
                     
                     # Mask -1 indices to 0, then gather weights
                     safe_indices = tf.where(y_task_true < 0, 0, y_task_true)
-=======
-                    loss_val = tf.keras.losses.sparse_categorical_crossentropy(y_task_true, y_task_pred)
-                    
-                    # Create a tensor of all class weights for this task
-                    weights_list = [tf.cast(class_weights[task_idx].get(i, 1.0), tf.float32) 
-                                   for i in range(self.model.config.get_num_classes(task_idx))]
-                    weights_map = tf.constant(weights_list, dtype=tf.float32)
-                    
-                    # Mask -1 indices to 0 to prevent crash, then gather weights
-                    safe_indices = tf.where(y_true_flat < 0, 0, tf.cast(y_true_flat, tf.int32))
->>>>>>> 1e4dba2b471c9d6a94e5ceef8e983820dc028337
                     sample_class_weights = tf.gather(weights_map, safe_indices)
                     loss_val = tf.reshape(loss_val, [-1]) * sample_class_weights
                     
