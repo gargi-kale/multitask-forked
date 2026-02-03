@@ -85,12 +85,7 @@ def load_model(
         config=model_config,
         encoder=encoder,
         embedding_dim=metadata.get('embedding_dim'),
-<<<<<<< HEAD
         dropout_rate=metadata.get('dropout_rate', 0.3)
-=======
-        dropout=metadata.get('dropout_rate', 0.3), # Eddie: change from dropout_rate to dropout
-        # custom_objects=custom_objects # Eddie: removed bc MultiTaskModel doesn't use this
->>>>>>> 1e4dba2b471c9d6a94e5ceef8e983820dc028337
     )
     
     # Build model by calling it once (required before loading weights)
