@@ -27,7 +27,7 @@ class MultiTaskModel(tf.keras.Model):
                  HuggingFace model name (e.g., 'bert-base-uncased'), or custom Keras layer
         trainable_encoder: Whether encoder weights are trainable
         embedding_dim: If using embeddings, their dimension
-        num_classes: Number of classes per task (default: 2 for binary)
+        num_classes_per_task: Number of classes per task (default: 2 for binary)
         dropout: Dropout rate (overrides config if provided)
         name: Optional model name
     
@@ -46,7 +46,7 @@ class MultiTaskModel(tf.keras.Model):
         encoder: Optional[Union[str, tf.keras.layers.Layer]] = None,
         trainable_encoder: bool = True,
         embedding_dim: Optional[int] = None,
-        num_classes: Optional[List[int]] = None,
+        num_classes_per_task: Optional[List[int]] = None,
         dropout_rate: Optional[float] = None,
         name: Optional[str] = None,
         **kwargs
@@ -61,13 +61,13 @@ class MultiTaskModel(tf.keras.Model):
         # self.config provides default values for the number of classes per task as
         # a list of integers. Users can override defaults by passing arguments directly.
         # If neither is provided, use a default of 2.
-        # Priority is num_classes > self.config.num_classes_per_task > 2 (default)
-        if not num_classes and not self.config.num_classes_per_task:
-            self.num_classes = [2] * self.config.total_outputs
-        elif num_classes is not None:
-            self.num_classes = num_classes
+        # Priority is num_classes_per_task > self.config.num_classes_per_task > 2 (default)
+        if not num_classes_per_task and not self.config.num_classes_per_task:
+            self.num_classes_per_task = [2] * self.config.total_outputs
+        elif num_classes_per_task is not None:
+            self.num_classes_per_task = num_classes_per_task
         else:
-            self.num_classes = self.config.num_classes_per_task
+            self.num_classes_per_task = self.config.num_classes_per_task
 
         self.dropout_rate = dropout_rate
         self.task_names = config.task_names
@@ -85,8 +85,8 @@ class MultiTaskModel(tf.keras.Model):
     
     def _validate_config(self):
         """Validate model configuration."""
-        if any(x < 2 for x in self.num_classes):
-            raise ValueError("num_classes must be at least 2")
+        if any(x < 2 for x in self.num_classes_per_task):
+            raise ValueError("num_classes_per_task must be at least 2")
         if not 0 <= self.dropout_rate < 1:
             raise ValueError("dropout_rate must be in range [0, 1)")
     
@@ -234,7 +234,7 @@ class MultiTaskModel(tf.keras.Model):
         
         for task_idx in range(self.config.total_outputs):
             task_type = self.config.get_task_type(task_idx)
-            num_classes = self.config.get_num_classes(task_idx)
+            num_classes = self.config.get_num_classes_per_task(task_idx)
             output_dim = self.config.get_output_dim_for_task(task_idx)
             task_name = self.task_names[task_idx] if self.task_names else f'task_{task_idx}'
             
@@ -336,7 +336,7 @@ class MultiTaskModel(tf.keras.Model):
         """Get model configuration for serialization."""
         config = super().get_config()
         config.update({
-            'num_classes': self.num_classes,
+            'num_classes_per_task': self.num_classes_per_task,
             'dropout': self.dropout_rate,
             'config': {
                 'task_structure': self.config.task_structure,
@@ -659,7 +659,7 @@ class MultiTaskModel(tf.keras.Model):
                 for task_idx, task_name in enumerate(sorted(labels_dict.keys())):
                     labels = labels_dict[task_name]
                     task_type = self.config.get_task_type(task_idx)
-                    num_classes = self.config.get_num_classes(task_idx)
+                    num_classes = self.config.get_num_classes_per_task(task_idx)
                     
                     # Check tensor
                     if not tf.is_tensor(labels):
