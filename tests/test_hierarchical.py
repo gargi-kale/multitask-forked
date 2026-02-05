@@ -53,13 +53,13 @@ def config_multiclass():
     )
 
 
-def _make_model(config, embedding_dim=64, num_classes=None, dropout_rate=0.1):
+def _make_model(config, embedding_dim=64, num_classes_per_task=None, dropout_rate=0.1):
     """Build MultiTaskModel with embeddings (no encoder) for testing."""
     return MultiTaskModel(
         config=config,
         encoder=None,
         embedding_dim=embedding_dim,
-        num_classes=num_classes,
+        num_classes_per_task=num_classes_per_task,
         dropout_rate=dropout_rate,
     )
 
@@ -75,41 +75,41 @@ class TestMultiTaskModelInit:
         model = _make_model(config_two_tasks, embedding_dim=64)
         assert model.uses_encoder is False
         assert model.embedding_dim == 64
-        assert len(model.num_classes) == 2
-        assert model.num_classes == [2, 2]
+        assert len(model.num_classes_per_task) == 2
+        assert model.num_classes_per_task == [2, 2]
 
     def test_build_with_embeddings_ten_tasks(self, config_ten_tasks):
-        """Model builds with 10 tasks and default num_classes."""
+        """Model builds with 10 tasks and default num_classes_per_task."""
         model = _make_model(config_ten_tasks, embedding_dim=128)
         assert model.uses_encoder is False
-        assert len(model.num_classes) == 10
-        assert all(n == 2 for n in model.num_classes)
+        assert len(model.num_classes_per_task) == 10
+        assert all(n == 2 for n in model.num_classes_per_task)
 
-    def test_num_classes_override(self, config_two_tasks):
-        """Passed num_classes overrides config default."""
+    def test_num_classes_per_task_override(self, config_two_tasks):
+        """Passed num_classes_per_task overrides config default."""
         model = _make_model(
             config_two_tasks,
             embedding_dim=64,
-            num_classes=[2, 5],
+            num_classes_per_task=[2, 5],
         )
-        assert model.num_classes == [2, 5]
+        assert model.num_classes_per_task == [2, 5]
 
-    def test_raises_when_num_classes_any_less_than_two(self, config_two_tasks):
-        """ValueError when any num_classes < 2."""
-        with pytest.raises(ValueError, match="num_classes must be at least 2"):
+    def test_raises_when_num_classes_per_task_any_less_than_two(self, config_two_tasks):
+        """ValueError when any num_classes_per_task < 2."""
+        with pytest.raises(ValueError, match="num_classes_per_task must be at least 2"):
             _make_model(
                 config_two_tasks,
                 embedding_dim=64,
-                num_classes=[2, 1],
+                num_classes_per_task=[2, 1],
             )
 
-    def test_raises_when_num_classes_zero(self, config_two_tasks):
-        """ValueError when num_classes contains 0."""
-        with pytest.raises(ValueError, match="num_classes must be at least 2"):
+    def test_raises_when_num_classes_per_task_zero(self, config_two_tasks):
+        """ValueError when num_classes_per_task contains 0."""
+        with pytest.raises(ValueError, match="num_classes_per_task must be at least 2"):
             _make_model(
                 config_two_tasks,
                 embedding_dim=64,
-                num_classes=[2, 0],
+                num_classes_per_task=[2, 0],
             )
 
     def test_raises_when_dropout_invalid(self, config_two_tasks):
@@ -285,4 +285,4 @@ class TestGetConfig:
         assert config["config"]["task_structure"] == [[2]]
         assert config["uses_encoder"] is False
         assert config["embedding_dim"] == 64
-        assert config["num_classes"] == [2, 2]
+        assert config["num_classes_per_task"] == [2, 2]

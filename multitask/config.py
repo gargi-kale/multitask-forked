@@ -273,7 +273,7 @@ class ModelConfig:
             return 'binary'
         return self.task_types[task_idx]
     
-    def get_num_classes(self, task_idx: int) -> int:
+    def get_num_classes_per_task(self, task_idx: int) -> int:
         """Get the number of classes for a specific task.
         
         Args:
@@ -299,7 +299,7 @@ class ModelConfig:
             Output dimension for this task
         """
         task_type = self.get_task_type(task_idx)
-        num_classes = self.get_num_classes(task_idx)
+        num_classes = self.get_num_classes_per_task(task_idx)
         
         if task_type == 'binary':
             return 1
