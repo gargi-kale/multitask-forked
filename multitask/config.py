@@ -181,6 +181,10 @@ class ModelConfig:
         if self.pooling_strategy not in valid_pooling:
             raise ValueError(f"pooling_strategy must be one of {valid_pooling}")
         
+        # Default num_classes_per_task to binary (2) per task when not provided
+        if self.num_classes_per_task is None:
+            self.num_classes_per_task = [2] * self.total_outputs
+        
         # Validate task_types if provided
         if self.task_types is not None:
             if len(self.task_types) != self.total_outputs:
@@ -195,29 +199,26 @@ class ModelConfig:
                         f"Invalid task_type '{task_type}'. Must be one of {valid_types}"
                     )
         
-        # Validate num_classes_per_task if provided
-        if self.num_classes_per_task is not None:
-            if len(self.num_classes_per_task) != self.total_outputs:
-                raise ValueError(
-                    f"num_classes_per_task length ({len(self.num_classes_per_task)}) must equal "
-                    f"total_outputs ({self.total_outputs})"
-                )
-            if not all(n >= 2 for n in self.num_classes_per_task):
-                raise ValueError("All num_classes_per_task values must be >= 2")
-            
-            # If task_types is specified, validate consistency
-            if self.task_types is not None:
-                for task_idx, (task_type, num_classes) in enumerate(zip(self.task_types, self.num_classes_per_task)):
-                    if task_type == 'binary' and num_classes != 2:
-                        raise ValueError(
-                            f"Task {task_idx} is type 'binary' but num_classes_per_task[{task_idx}]={num_classes}. "
-                            f"Binary tasks should have num_classes=2."
-                        )
-                    elif task_type == 'multiclass' and num_classes < 3:
-                        raise ValueError(
-                            f"Task {task_idx} is type 'multiclass' but num_classes_per_task[{task_idx}]={num_classes}. "
-                            f"Multiclass tasks should have num_classes >= 3."
-                        )
+        # Validate num_classes_per_task (always set after default above)
+        if len(self.num_classes_per_task) != self.total_outputs:
+            raise ValueError(
+                f"num_classes_per_task length ({len(self.num_classes_per_task)}) must equal "
+                f"total_outputs ({self.total_outputs})"
+            )
+        if not all(n >= 2 for n in self.num_classes_per_task):
+            raise ValueError("All num_classes_per_task values must be >= 2")
+        if self.task_types is not None:
+            for task_idx, (task_type, num_classes) in enumerate(zip(self.task_types, self.num_classes_per_task)):
+                if task_type == 'binary' and num_classes != 2:
+                    raise ValueError(
+                        f"Task {task_idx} is type 'binary' but num_classes_per_task[{task_idx}]={num_classes}. "
+                        f"Binary tasks should have num_classes=2."
+                    )
+                elif task_type == 'multiclass' and num_classes < 3:
+                    raise ValueError(
+                        f"Task {task_idx} is type 'multiclass' but num_classes_per_task[{task_idx}]={num_classes}. "
+                        f"Multiclass tasks should have num_classes >= 3."
+                    )
         
         # Validate task_names if provided
         if self.task_names is not None:
