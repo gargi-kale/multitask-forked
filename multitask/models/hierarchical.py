@@ -58,16 +58,10 @@ class MultiTaskModel(tf.keras.Model):
         
         self.config = config
         
-        # self.config provides default values for the number of classes per task as
-        # a list of integers. Users can override defaults by passing arguments directly.
-        # If neither is provided, use a default of 2.
-        # Priority is num_classes_per_task > self.config.num_classes_per_task > 2 (default)
-        if not num_classes_per_task and not self.config.num_classes_per_task:
-            self.num_classes_per_task = [2] * self.config.total_outputs
-        elif num_classes_per_task is not None:
-            self.num_classes_per_task = num_classes_per_task
-        else:
-            self.num_classes_per_task = self.config.num_classes_per_task
+        # Number of classes per task: constructor overrides config default (config sets [2]*total_outputs when not provided).
+        self.num_classes_per_task = (
+            num_classes_per_task if num_classes_per_task is not None else self.config.num_classes_per_task
+        )
 
         self.dropout_rate = dropout_rate
         self.task_names = config.task_names
