@@ -7,7 +7,149 @@ the relevant functions.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
+from enum import Enum
+
+
+"""
+Encoder classes for better scalability and separation of concerns. All encoder-
+related state and logic live in EncoderConfig. This limits flat fields and branches
+in ModelConfig, and allows ModelConfig to focus on tasks and layer structure.
+
+The EncoderConfig class is also easier to extend as encoder options grow (e.g. 
+more API encoders). Additionally, users can reuse EncoderConfigs across multiple
+ModelConfig instances. 
+
+Users still have the option to define flat encoder variables in ModelConfig.
+
+Note that we now also distinguish between encoder input types -- what input
+format the encoder expects -- from encoder integration -- how we load and call
+the encoder. This becomes important when we have API encoders that all
+accept raw string input but are accessed in different ways.
+"""
+class EncoderIntegration(str, Enum):
+    """How we load and call the encoder."""
+
+    # Local encoders
+    TFHUB = "tfhub"
+    HUGGINGFACE = "huggingface"
+    KERAS = "keras"
+
+    # API encoders
+    # Commonly used
+    OPENAI = "openai"
+    COHERE = "cohere"
+    VOYAGE = "voyage"
+    SENTENCE_TRANSFORMERS = "sentence_transformers"
+
+    # TODO: Add support if needed
+    # Cloud platforms that host multiple model types
+    # GOOGLE_VERTEX = "google_vertex"
+    # AZURE = "azure"
+
+    # Word embedding libraries, not contextual encoders
+    # They produce per-token static embeddings that need to be aggregated to
+    # sentence level. Not sure if people still use these.
+    # FASTTEXT = "fasttext"
+    # SPACY = "spacy"
+    # GENSIM = "gensim"
+
+    # Add more as needed
+
+class EncoderInputType(str, Enum):
+    """What input format the encoder expects."""
+    HUGGINGFACE_TOKENS = "huggingface_tokens"   # input_ids, attention_mask, token_type_ids
+    TFHUB_TOKENS = "tfhub_tokens"               # input_word_ids, input_mask, input_type_ids
+    RAW_STRING = "raw_string"                   # tf.string tensor
+    PRECOMPUTED = "precomputed"                 # float tensor of embeddings
+
+
+@dataclass
+class EncoderConfig:
+    """Configuration for the encoder used by the multi-task model.
+
+    Use this to specify a pre-trained encoder (TF Hub, Hugging Face, API-based)
+    or a custom Keras layer. Pass API keys here for API encoders.
+
+    For pre-computed embeddings (no encoder), use encoder_config=None and
+    pass embedding_dim when building the model.
+    """
+    # Encoder specification: either a custom Keras layer or an identifier string
+    # If encoder is set, encoder_input_type must be set. If encoder_identifier
+    # is set, integration and input type can be inferred for known schemes.
+    encoder: Optional[Any] = None  # Keras Layer when custom
+    encoder_identifier: Optional[str] = None
+
+    # Inferred or user-set
+    encoder_input_type: Optional[EncoderInputType] = None
+    encoder_integration: Optional[EncoderIntegration] = None
+
+    # Encoder settings
+    trainable_encoder: bool = True
+
+    # When using pre-computed embeddings (no encoder), the embedding dimension.
+    # Can be set here or passed to MultiTaskModel(embedding_dim=...); constructor overrides.
+    embedding_dim: Optional[int] = None
+
+    # API key for API encoders (OpenAI, Cohere, Voyage, etc.).
+    # Do not serialize to disk; use environment variables or pass at runtime.
+    api_key: Optional[str] = None
+
+    def __post_init__(self):
+        """Validate encoder configuration."""
+        if self.encoder is not None:
+            import tensorflow as tf
+            if not isinstance(self.encoder, tf.keras.layers.Layer):
+                raise ValueError("Custom encoder must be a Keras Layer.")
+            if self.encoder_input_type is None:
+                raise ValueError("Custom encoder requires encoder_input_type.")
+
+        # API encoders are not trainable
+        if self.encoder_integration is not None and self.encoder_integration not in (
+            EncoderIntegration.TFHUB,
+            EncoderIntegration.HUGGINGFACE,
+            EncoderIntegration.KERAS,
+        ):
+            self.trainable_encoder = False
+
+    def get_api_key(self) -> Optional[str]:
+        """Return the API key for the encoder, if set. Otherwise encoders use env vars."""
+        return self.api_key
+
+    def to_dict_for_save(self) -> Dict[str, Any]:
+        """Return a dict suitable for JSON persistence (excludes encoder and API keys)."""
+        return {
+            "encoder_identifier": self.encoder_identifier,
+            "encoder_input_type": self.encoder_input_type.value if self.encoder_input_type is not None else None,
+            "encoder_integration": self.encoder_integration.value if self.encoder_integration is not None else None,
+            "trainable_encoder": self.trainable_encoder,
+            "embedding_dim": self.embedding_dim,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "EncoderConfig":
+        """Build EncoderConfig from a dict (e.g. loaded from JSON).
+
+        Does not restore encoder (Keras layer) or API keys; use at load time
+        with encoder override or set API keys from environment.
+        """
+        input_type = d.get("encoder_input_type")
+        integration = d.get("encoder_integration")
+
+        if input_type is not None and not isinstance(input_type, EncoderInputType):
+            input_type = EncoderInputType(input_type)
+        if integration is not None and not isinstance(integration, EncoderIntegration):
+            integration = EncoderIntegration(integration)
+
+        return cls(
+            encoder=None,
+            encoder_identifier=d.get("encoder_identifier"),
+            encoder_input_type=input_type,
+            encoder_integration=integration,
+            trainable_encoder=d.get("trainable_encoder", True),
+            embedding_dim=d.get("embedding_dim"),
+            api_key=None,
+        )
 
 
 @dataclass
@@ -36,7 +178,7 @@ class TrainingConfig:
     early_stopping_min_delta: float = 0.001
     
     # Optimizer settings
-    optimizer_type: str = 'adamw'  # 'adamw', 'adam', 'sgd'
+    optimizer_type: str = 'adam'  # 'adamw', 'adam', 'sgd'
     
     # Learning rate schedule settings
     use_lr_schedule: bool = True
@@ -106,9 +248,15 @@ class ModelConfig:
     # Optional shared encoder layers before branching
     shared_layer_sizes: Optional[List[int]] = field(default_factory=lambda: [256, 128])
     
-    # Encoder settings
+    # Encoder specifications: pass encoder_config or use flat kwargs (backward compatible)
+    encoder_config: Optional[EncoderConfig] = None
+    encoder: Optional[Any] = None
+    encoder_identifier: Optional[str] = None
+    encoder_input_type: Optional[EncoderInputType] = None
+    encoder_integration: Optional[EncoderIntegration] = None
     trainable_encoder: bool = True
-    
+    embedding_dim: Optional[int] = None
+
     # Pooling strategy for hierarchical outputs (if applicable)
     # Options: 'concat', 'max', 'mean', 'sum', None (no pooling)
     pooling_strategy: Optional[str] = None
@@ -128,10 +276,6 @@ class ModelConfig:
     # Must be a list of length equal to total_tasks
     # Example: [2, 2, 5, 2, 2, 3, 2, 2, 2, 2] for 10 tasks (some binary, some multiclass)
     num_classes_per_task: Optional[List[int]] = None
-
-    # Encoder specifications
-    encoder_type: Optional[str] = None
-    encoder_name: Optional[str] = None
     
     def __post_init__(self):
         """Validate configuration after initialization."""
@@ -179,7 +323,25 @@ class ModelConfig:
         # Validate default layer sizes
         if not all(s > 0 for s in self.default_layer_sizes):
             raise ValueError("All default_layer_sizes must be positive")
-        
+
+        # Build encoder_config from flat kwargs when not provided (backward compat + load from JSON)
+        if self.encoder_config is None:
+            ei = self.encoder_input_type
+            if ei is not None and not isinstance(ei, EncoderInputType):
+                ei = EncoderInputType(ei)
+            eg = self.encoder_integration
+            if eg is not None and not isinstance(eg, EncoderIntegration):
+                eg = EncoderIntegration(eg)
+            self.encoder_config = EncoderConfig(
+                encoder=self.encoder,
+                encoder_identifier=self.encoder_identifier,
+                encoder_input_type=ei,
+                encoder_integration=eg,
+                trainable_encoder=self.trainable_encoder,
+                embedding_dim=self.embedding_dim,
+                api_key=None,
+            )
+
         # Validate pooling strategy
         valid_pooling = {'concat', 'max', 'mean', 'sum', None}
         if self.pooling_strategy not in valid_pooling:
@@ -265,6 +427,7 @@ class ModelConfig:
             Total number of branches at that level
         """
         return sum(self.task_structure[level])    
+
     def get_task_type(self, task_idx: int) -> str:
         """Get the type of a specific task.
         

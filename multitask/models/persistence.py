@@ -6,7 +6,7 @@ from typing import Optional, Union, Dict
 
 import tensorflow as tf
 
-from ..config import ModelConfig
+from ..config import ModelConfig, EncoderConfig, EncoderInputType, EncoderIntegration
 from .hierarchical import MultiTaskModel
 
 
@@ -27,27 +27,25 @@ def _get_build_dummy_input(model: MultiTaskModel, metadata: dict):
     Returns:
         Dummy input (Tensor or dict of Tensors) for model(dummy_input, training=False).
     """
-    if model.uses_encoder:
-        if model.encoder_type == 'huggingface':
-            return {
-                'input_ids': tf.zeros((1, 128), dtype=tf.int32),
-                'attention_mask': tf.ones((1, 128), dtype=tf.int32),
-                'token_type_ids': tf.zeros((1, 128), dtype=tf.int32),
-            }
-        elif model.encoder_type == 'tfhub':
-            encoder_identifier = metadata.get('encoder_identifier', '')
-            if encoder_identifier and 'universal-sentence-encoder' in encoder_identifier.lower():
-                return tf.constant(["dummy text for model building"], dtype=tf.string)
-            else:
-                return {
-                    'input_word_ids': tf.zeros((1, 128), dtype=tf.int32),
-                    'input_mask': tf.ones((1, 128), dtype=tf.int32),
-                    'input_type_ids': tf.zeros((1, 128), dtype=tf.int32),
-                }
-        else:  # custom encoder
-            return tf.constant(["dummy text for model building"], dtype=tf.string)
-    else:
-        return tf.zeros((1, metadata['embedding_dim']))
+    DUMMY_INPUT_BUILDERS = {
+        EncoderInputType.HUGGINGFACE: lambda: {
+            'input_ids': tf.zeros((1, 128), dtype=tf.int32),
+            'attention_mask': tf.ones((1, 128), dtype=tf.int32),
+            'token_type_ids': tf.zeros((1, 128), dtype=tf.int32),
+        },
+        EncoderInputType.TFHUB_TOKENS: lambda: {
+            'input_word_ids': tf.zeros((1, 128), dtype=tf.int32),
+            'input_mask': tf.ones((1, 128), dtype=tf.int32),
+            'input_type_ids': tf.zeros((1, 128), dtype=tf.int32),
+        },
+        EncoderInputType.RAW_STRING: lambda: tf.constant(["dummy text"], dtype=tf.string),
+        EncoderInputType.PRECOMPUTED: lambda: tf.zeros((1, metadata['embedding_dim']))
+    }
+
+    input_type = getattr(model, 'encoder_input_type', None)
+    if input_type is None:
+        input_type = EncoderInputType.PRECOMPUTED
+    return DUMMY_INPUT_BUILDERS.get(input_type)()
 
 
 def load_model(
@@ -95,8 +93,13 @@ def load_model(
     
     with open(config_path, 'r') as f:
         config_dict = json.load(f)
-    
-    model_config = ModelConfig(**config_dict)
+
+    # Support nested encoder_config or flat encoder_* keys (backward compat)
+    if "encoder_config" in config_dict:
+        encoder_config = EncoderConfig.from_dict(config_dict.pop("encoder_config"))
+        model_config = ModelConfig(encoder_config=encoder_config, **config_dict)
+    else:
+        model_config = ModelConfig(**config_dict)
     
     # Load metadata
     metadata_path = os.path.join(filepath, 'metadata.json')
@@ -154,7 +157,8 @@ def load_model(
     
     print(f"Model loaded from {filepath}/")
     print(f"  - Encoder type: {model.encoder_type or 'embeddings'}")
-    print(f"  - Tasks: {', '.join(model.config.task_names)}")
+    task_names = model.config.task_names or [f'task_{i}' for i in range(model.config.total_outputs)]
+    print(f"  - Tasks: {', '.join(task_names)}")
     print(f"  - Trainable parameters: {model.count_params():,}")
     if thresholds:
         print(f"  - Thresholds: {list(thresholds.keys())}")
