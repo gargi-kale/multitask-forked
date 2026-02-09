@@ -325,6 +325,25 @@ class MultiTaskModel(tf.keras.Model):
             output_dict[task_name] = output
         
         return output_dict
+
+    def test_step(self, data):
+        """Custom evaluation step to handle dictionary outputs correctly."""
+        if len(data) == 3:
+            x, y, sample_weight = data
+        else:
+            x, y = data
+            sample_weight = None
+
+        # Forward pass
+        y_pred = self(x, training=False)
+        
+        # Compute loss
+        self.compute_loss(x, y, y_pred, sample_weight)
+        
+        # Update metrics
+        self.compiled_metrics.update_state(y, y_pred, sample_weight)
+        
+        return {m.name: m.result() for m in self.metrics}
     
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization."""

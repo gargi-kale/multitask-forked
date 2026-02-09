@@ -91,11 +91,9 @@ def test_broadcasting_safety_reshape(dummy_trainer):
 
 def test_paper_compliant_normalization(dummy_trainer):
     """
-    Verifies that the loss follows Equation 2 (Global Label-wise Normalization).
-    Tasks with more valid labels should contribute more to the denominator.
+    Verifies that the loss follows sample-level global normalization.
+    Each sample contributes equally regardless of number of labels.
     """
-    # task_binary has 1 valid label; task_multilabel has 2 valid labels.
-    # Total valid entries should be 3.
     y_true = {
         'task_binary': tf.constant([[1.0]], dtype=tf.float32),
         'task_multilabel': tf.constant([[1.0, 0.0]], dtype=tf.float32)
@@ -106,14 +104,38 @@ def test_paper_compliant_normalization(dummy_trainer):
     }
     
     loss_fn = dummy_trainer._build_loss_function(
-        num_tasks=2, 
-        class_weights=[{0: 1.0, 1: 1.0}, {0: 1.0, 1: 1.0}], 
-        task_weights=[1.0, 1.0]
+        num_tasks=3,
+        class_weights=[
+            {0: 1.0, 1: 1.0},  # task_binary
+            {0: 1.0, 1: 1.0},  # task_multiclass (unused)
+            {0: 1.0, 1: 1.0},  # task_multilabel
+        ],
+        task_weights=[1.0, 1.0, 1.0]
     )
     
     loss = loss_fn(y_true, y_pred)
-    # Binary CE for 0.5 is approx 0.693. 
-    # Total Loss = (0.693 * 1) + (0.693 * 2) = 2.079
-    # Global Denominator = 3 labels
-    # Expected = 0.693
-    assert pytest.approx(loss.numpy(), 0.01) == 0.693
+    assert pytest.approx(loss.numpy(), 0.01) == 1.0395
+    
+    
+def test_warmup_signature_compatibility(dummy_trainer):
+    """
+    Verifies the fix for 'WarmUp.__call__() missing 1 required positional argument'.
+    Ensures the LR schedule can be called by the optimizer without an explicit step.
+    """
+    # Configure warmup
+    dummy_trainer.config.use_warmup = True
+    dummy_trainer.config.warmup_percent = 5
+    
+    # Build the schedule (this uses your new safe_call wrapper)
+    lr_schedule = dummy_trainer._build_lr_schedule(steps_per_epoch=100)
+    
+    # Test 1: Calling with an explicit step (standard behavior)
+    val_with_step = lr_schedule(tf.constant(10, dtype=tf.float32))
+    
+    # Test 2: Calling WITHOUT a step (The Keras 3 behavior that was crashing)
+    # This would throw TypeError without your fix.
+    try:
+        val_no_step = lr_schedule() 
+        assert val_no_step is not None
+    except TypeError as e:
+        pytest.fail(f"WarmUp schedule still requires a positional 'step' argument: {e}")
