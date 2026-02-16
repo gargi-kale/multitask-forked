@@ -138,7 +138,7 @@ class Trainer:
         """
         task_weights_tf = tf.cast(task_weights, tf.float32)
         
-        def dict_weighted_masked_loss(y_true_dict, y_pred_dict):
+        def dict_weighted_masked_loss(y_true_dict: Any, y_pred_dict: Any):
             """Compute multi-task loss combining individual task losses.
             
             For each task:
@@ -148,12 +148,40 @@ class Trainer:
             4. Accumulate into total loss
             
             Final loss is averaged over all valid (non-masked) samples.
-            """
-            # dynamic route inputs
-            y_true_dict, y_pred_dict = self._route_inputs(y_true_dict, y_pred_dict)
             
-            total_loss = tf.constant(0.0, dtype=tf.float32)
-            num_valid_samples = tf.constant(0.0, dtype=tf.float32)
+            Note: During graph construction, Keras may pass SymbolicTensor objects
+            instead of dicts. This function handles both cases.
+            """
+            # Convert to dict if not already (handles SymbolicTensor case during graph construction)
+            try:
+                # Try to access as dict - if this works, it's already a dict
+                _ = y_true_dict.keys()
+            except (AttributeError, TypeError):
+                # Not a dict - try to convert using model structure
+                if self.model.task_names:
+                    task_names_list = sorted(self.model.task_names)
+                else:
+                    task_names_list = [f'task_{i}' for i in range(num_tasks)]
+                
+                # Try to convert: assume it's a list/tuple of tensors matching task order
+                try:
+                    if hasattr(y_true_dict, '__len__') and not isinstance(y_true_dict, (str, bytes)):
+                        # Convert list/tuple to dict
+                        y_true_dict = {task_names_list[i]: y_true_dict[i] for i in range(len(task_names_list))}
+                        y_pred_dict = {task_names_list[i]: y_pred_dict[i] for i in range(len(task_names_list))}
+                    else:
+                        # Can't convert - raise informative error
+                        raise TypeError(
+                            f"Cannot convert y_true_dict from {type(y_true_dict).__name__} to dict."
+                        )
+                except (TypeError, IndexError, AttributeError) as e:
+                    raise TypeError(
+                        f"Cannot convert y_true_dict from {type(y_true_dict).__name__} to dict."
+                        f"Original error: {e}"
+                    )
+            
+            total_loss = 0.0
+            num_valid_samples = 0
             
             # Get task names from y_true_dict (should match y_pred_dict)
             task_names = sorted(y_true_dict.keys())
