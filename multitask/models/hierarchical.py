@@ -8,12 +8,13 @@ import copy
 import tensorflow as tf
 from typing import Optional, Union, Dict, List, Any, Tuple
 from multitask.config import ModelConfig, EncoderConfig, EncoderInputType, EncoderIntegration
-from .encoders import OpenAIEncoder, CohereEncoder, VoyageEncoder
+from .encoders import OpenAIEncoder, CohereEncoder, VoyageEncoder, HFInferenceEncoder
 
 API_ENCODER_CLASSES = {
     EncoderIntegration.OPENAI: OpenAIEncoder,
     EncoderIntegration.COHERE: CohereEncoder,
-    EncoderIntegration.VOYAGE: VoyageEncoder
+    EncoderIntegration.VOYAGE: VoyageEncoder,
+    EncoderIntegration.HUGGINGFACE_API: HFInferenceEncoder,
 }
 
 
@@ -99,22 +100,6 @@ class MultiTaskModel(tf.keras.Model):
             raise ValueError("num_classes_per_task must be at least 2")
         if not 0 <= self.dropout_rate < 1:
             raise ValueError("dropout_rate must be in range [0, 1)")
-
-    @staticmethod
-    def _encoder_integration_from_identifier(encoder_identifier: str) -> tuple[EncoderIntegration, str]:
-        if encoder_identifier.startswith('https://tfhub.dev/'):
-            return EncoderIntegration.TFHUB, encoder_identifier
-        
-        if ':' in encoder_identifier:
-            prefix, model_name = encoder_identifier.split(':', 1)
-            try:
-                integration = EncoderIntegration(prefix.lower())
-            except:
-                raise ValueError(f"Unrecognized integration: {prefix} from identifier {encoder_identifier}")
-            return integration, model_name
-        
-        # Default fallback for bare model names
-        return EncoderIntegration.HUGGINGFACE, encoder_identifier
     
     def _build_encoder(
         self,
@@ -178,9 +163,8 @@ class MultiTaskModel(tf.keras.Model):
 
         # Using other pre-trained encoder
         elif self.encoder_config.encoder_identifier is not None:
-            # Users just have to pass in the identifier and we'll take care of the rest
-            encoder_integration, encoder_identifier = self._encoder_integration_from_identifier(self.encoder_config.encoder_identifier)
-            self.config.encoder_config.encoder_integration = encoder_integration
+            encoder_integration = self.encoder_config.encoder_integration
+            encoder_identifier = self.encoder_config.encoder_identifier
             self.encoder_integration = encoder_integration
             self._encoder_identifier = encoder_identifier
             trainable_encoder = self.encoder_config.trainable_encoder
@@ -891,9 +875,9 @@ class MultiTaskModel(tf.keras.Model):
         # Save model weights
         weights_path = os.path.join(filepath, 'weights')
         if save_format == 'tf':
-            self.save_weights(weights_path, save_format='tf')
+            self.save_weights(weights_path)
         else:
-            self.save_weights(weights_path + '.h5', save_format='h5')
+            self.save_weights(weights_path + '.h5')
         
         # Save ModelConfig (flat encoder keys for backward compat with load)
         config_dict = {

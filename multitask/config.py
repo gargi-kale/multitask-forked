@@ -40,6 +40,7 @@ class EncoderIntegration(str, Enum):
     OPENAI = "openai"
     COHERE = "cohere"
     VOYAGE = "voyage"
+    HUGGINGFACE_API = "huggingface_api"
     SENTENCE_TRANSFORMERS = "sentence_transformers"
 
     # TODO: Add support if needed
@@ -104,6 +105,9 @@ class EncoderConfig:
             if self.encoder_input_type is None:
                 raise ValueError("Custom encoder requires encoder_input_type.")
 
+        if self.encoder_identifier is not None:
+            self.resolve_identifier(self.encoder_identifier)
+
         # API encoders are not trainable
         if self.encoder_integration is not None and self.encoder_integration not in (
             EncoderIntegration.TFHUB,
@@ -150,6 +154,24 @@ class EncoderConfig:
             embedding_dim=d.get("embedding_dim"),
             api_key=None,
         )
+
+    def resolve_identifier(self, encoder_identifier: str) -> tuple[EncoderIntegration, str]:
+        if encoder_identifier.startswith('https://tfhub.dev/'):
+            self.encoder_integration = EncoderIntegration.TFHUB
+        
+        elif ':' in encoder_identifier:
+            prefix, model_name = encoder_identifier.split(':', 1)
+            try:
+                integration = EncoderIntegration(prefix.lower())
+            except:
+                raise ValueError(f"Unrecognized integration: {prefix} from identifier {encoder_identifier}")
+            
+            self.encoder_integration = integration
+            self.encoder_identifier = model_name
+        
+        # Default fallback for bare model names
+        else:
+            self.encoder_integration = EncoderIntegration.HUGGINGFACE
 
 
 @dataclass
