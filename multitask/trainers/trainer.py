@@ -260,7 +260,7 @@ class Trainer:
         # Add warmup if enabled
         # fix: use native keras 3 compatible warmup wrapper instead of official.nlp optimization.WarmUp
         if self.config.use_warmup:
-            num_warmup_steps = max(1, num_train_steps // self.config.warmup_percent)
+            num_warmup_steps = max(1, int(num_train_steps * self.config.warmup_percent / 100))
             
             return WarmUpWrapper(
                 warmup_steps=num_warmup_steps,
