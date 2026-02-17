@@ -812,7 +812,7 @@ class MultiTaskModel(tf.keras.Model):
         config_dict = {
             'task_structure': self.config.task_structure,
             'task_types': self.config.task_types,
-            'num_classes': self.num_classes_per_task,
+            'num_classes_per_task': self.num_classes_per_task,
             'task_names': self.config.task_names,
             'shared_layer_sizes': self.config.shared_layer_sizes,
             'branch_layer_sizes': self.config.branch_layer_sizes,
@@ -829,7 +829,7 @@ class MultiTaskModel(tf.keras.Model):
             'encoder_type': self.encoder_type,
             'uses_encoder': self.uses_encoder,
             'embedding_dim': self.embedding_dim,
-            'num_classes': self.num_classes,
+            'num_classes_per_task': self.num_classes_per_task,
             'dropout_rate': self.dropout_rate,
         }
         

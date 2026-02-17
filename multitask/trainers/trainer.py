@@ -141,39 +141,6 @@ class Trainer:
             4. Accumulate into total loss
             
             Final loss is averaged over all valid (non-masked) samples.
-<<<<<<< HEAD
-            """
-            try:
-          # Try to access as dict - if this works, it's already a dict
-               _ = y_true_dict.keys()
-            except (AttributeError, TypeError):
-                # Not a dict - try to convert using model structure
-                if self.model.task_names:
-                    task_names_list = sorted(self.model.task_names)
-                else:
-                    task_names_list = [f'task_{i}' for i in range(num_tasks)]
-                
-                # Try to convert: assume it's a list/tuple of tensors matching task order
-                try:
-                    if hasattr(y_true_dict, '__len__') and not isinstance(y_true_dict, (str, bytes)):
-                        # Convert list/tuple to dict
-                        y_true_dict = {task_names_list[i]: y_true_dict[i] for i in range(len(task_names_list))}
-                        y_pred_dict = {task_names_list[i]: y_pred_dict[i] for i in range(len(task_names_list))}
-                    else:
-                        # Can't convert - raise informative error
-                        raise TypeError(
-                            f"Cannot convert y_true_dict from {type(y_true_dict).__name__} to dict."
-                        )
-                except (TypeError, IndexError, AttributeError) as e:
-                    raise TypeError(
-                        f"Cannot convert y_true_dict from {type(y_true_dict).__name__} to dict."
-                        f"Original error: {e}"
-                    )
-            
-            total_loss = tf.constant(0.0, dtype=tf.float32)
-            num_valid_entries = tf.constant(0.0, dtype=tf.float32)
-            mask_value_tf = tf.cast(mask_value, tf.float32)
-=======
             
             Note: During graph construction, Keras may pass SymbolicTensor objects
             instead of dicts. This function handles both cases.
@@ -208,7 +175,6 @@ class Trainer:
             
             total_loss = 0.0
             num_valid_samples = 0
->>>>>>> bfc06fdf3032700cb610c9e44b8683f1af54864a
             
             for real_idx, task_name in enumerate(self.model.task_names):
                 y_task_true = y_true_dict[task_name]
@@ -223,7 +189,7 @@ class Trainer:
                 else:
                     loss_val = tf.reshape(tf.keras.losses.binary_crossentropy(y_task_true, y_task_pred), [-1])
                     y_true_flat = tf.reshape(y_task_true, [-1])
-                    mask = tf.cast(tf.not_equal(y_true_flat, mask_value_tf), tf.float32)
+                    mask = tf.cast(tf.not_equal(y_true_flat, mask_value), tf.float32)
                 
                 # class weight
                 cw0 = tf.cast(class_weights[real_idx].get(0, 1.0), tf.float32)
@@ -244,10 +210,10 @@ class Trainer:
                 # final aggregation and normalization
                 weighted_loss = loss_val * mask * task_weights_tf[real_idx]
                 total_loss += tf.reduce_sum(weighted_loss)
-                num_valid_entries += tf.reduce_sum(mask)
+                num_valid_samples += tf.reduce_sum(mask)
             
             # Average over valid entries
-            return total_loss / (num_valid_entries + 1e-7)
+            return total_loss / (num_valid_samples + 1e-7)
         
         return dict_weighted_masked_loss
     
