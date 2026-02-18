@@ -325,6 +325,25 @@ class MultiTaskModel(tf.keras.Model):
             output_dict[task_name] = output
         
         return output_dict
+
+    def test_step(self, data):
+        """Custom evaluation step to handle dictionary outputs correctly."""
+        if len(data) == 3:
+            x, y, sample_weight = data
+        else:
+            x, y = data
+            sample_weight = None
+
+        # Forward pass
+        y_pred = self(x, training=False)
+        
+        # Compute loss
+        self.compute_loss(x, y, y_pred, sample_weight)
+        
+        # Update metrics
+        self.compiled_metrics.update_state(y, y_pred, sample_weight)
+        
+        return {m.name: m.result() for m in self.metrics}
     
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization."""
@@ -793,7 +812,7 @@ class MultiTaskModel(tf.keras.Model):
         config_dict = {
             'task_structure': self.config.task_structure,
             'task_types': self.config.task_types,
-            'num_classes_per_task': self.num_classes,
+            'num_classes_per_task': self.num_classes_per_task,
             'task_names': self.config.task_names,
             'shared_layer_sizes': self.config.shared_layer_sizes,
             'branch_layer_sizes': self.config.branch_layer_sizes,
@@ -810,7 +829,7 @@ class MultiTaskModel(tf.keras.Model):
             'encoder_type': self.encoder_type,
             'uses_encoder': self.uses_encoder,
             'embedding_dim': self.embedding_dim,
-            'num_classes': self.num_classes,
+            'num_classes_per_task': self.num_classes_per_task,
             'dropout_rate': self.dropout_rate,
         }
         

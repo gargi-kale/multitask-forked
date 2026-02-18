@@ -1,0 +1,140 @@
+import pytest
+import tensorflow as tf
+import numpy as np
+from multitask.trainers.trainer import Trainer
+from multitask.config import TrainingConfig, ModelConfig
+from multitask.models.hierarchical import MultiTaskModel
+
+
+@pytest.fixture
+def dummy_trainer():
+    """Initialize a trainer with a 3-task ModelConfig matching the research scope."""
+    config = ModelConfig(
+        task_structure=[[3]], 
+        task_names=["task_binary", "task_multiclass", "task_multilabel"],
+        task_types=["binary", "multiclass", "multilabel"],
+        num_classes_per_task=[2, 3, 2]
+    )
+    model = MultiTaskModel(config=config, embedding_dim=128)
+    trainer = Trainer(model=model, config=TrainingConfig())
+    return trainer
+
+
+def test_loss_dictionary_direct_access(dummy_trainer):
+    """Verifies that the loss correctly pulls from y_true_dict keys."""
+    y_true = {
+        "task_binary": tf.constant([[1.0]], dtype=tf.float32),
+        "task_multiclass": tf.constant([2], dtype=tf.int32), 
+        "task_multilabel": tf.constant([[1.0, 0.0]], dtype=tf.float32)
+    }
+    y_pred = {
+        "task_binary": tf.constant([[0.8]], dtype=tf.float32),
+        "task_multiclass": tf.constant([[0.1, 0.1, 0.8]], dtype=tf.float32),
+        "task_multilabel": tf.constant([[0.7, 0.2]], dtype=tf.float32)
+    }
+    
+    loss_fn = dummy_trainer._build_loss_function(
+        num_tasks=3, 
+        class_weights=[{0: 1.0, 1: 1.0, 2: 1.0}] * 3, 
+        task_weights=[1.0, 1.0, 1.0]
+    )
+    
+    loss = loss_fn(y_true, y_pred)
+    assert loss.dtype == tf.float32
+    assert loss > 0
+
+
+def test_masking_and_normalization_logic():
+    """Verifies that mask_value (-1) is excluded from loss and averaging."""
+    # Create a trainer with only 1 task for this specific test
+    config = ModelConfig(
+        task_structure=[[1]], 
+        task_names=["task_binary"],
+        task_types=["binary"],
+        num_classes_per_task=[2]
+    )
+    model = MultiTaskModel(config=config, embedding_dim=128)
+    trainer = Trainer(model=model, config=TrainingConfig())
+    
+    # 2 labels - one is masked
+    y_true = {'task_binary': tf.constant([[1.0], [-1.0]], dtype=tf.float32)}
+    y_pred = {'task_binary': tf.constant([[0.5], [0.5]], dtype=tf.float32)}
+    
+    loss_fn = trainer._build_loss_function(
+        num_tasks=1, 
+        class_weights=[{0: 1.0, 1: 1.0}], 
+        task_weights=[1.0]
+    )
+    
+    loss = loss_fn(y_true, y_pred)
+    # (0.693 * 1.0 + 0.0) / 1.0 valid label = 0.693
+    assert loss.numpy() == pytest.approx(0.693, abs=0.01)
+
+
+def test_class_weights_scaling():
+    """Verifies that class_weights (w_t^c) correctly scale the loss."""
+    config = ModelConfig(
+        task_structure=[[1]], 
+        task_names=["task_binary"],
+        task_types=["binary"],
+        num_classes_per_task=[2]
+    )
+    model = MultiTaskModel(config=config, embedding_dim=128)
+    trainer = Trainer(model=model, config=TrainingConfig())
+    
+    y_true = {'task_binary': tf.constant([[1.0]], dtype=tf.float32)}
+    y_pred = {'task_binary': tf.constant([[0.5]], dtype=tf.float32)}
+    
+    # Weight class 1 as 5x more important
+    loss_fn = trainer._build_loss_function(
+        num_tasks=1,
+        class_weights=[{0: 1.0, 1: 5.0}],
+        task_weights=[1.0]
+    )
+    
+    loss = loss_fn(y_true, y_pred)
+    # (0.693 * 5.0) / 1.0 = 3.465
+    assert loss.numpy() == pytest.approx(3.465, abs=0.01)
+
+
+def test_task_weights_importance():
+    """Verifies task-level importance scaling (nu_k) for mixed corpora."""
+    config = ModelConfig(
+        task_structure=[[2]], 
+        task_names=['task_binary', 'task_multiclass'],
+        task_types=['binary', 'multiclass'],
+        num_classes_per_task=[2, 3]
+    )
+    model = MultiTaskModel(config=config, embedding_dim=128)
+    trainer = Trainer(model=model, config=TrainingConfig())
+    
+    y_true = {
+        'task_binary': tf.constant([[1.0]], dtype=tf.float32),
+        'task_multiclass': tf.constant([0], dtype=tf.int32)
+    }
+    y_pred = {
+        'task_binary': tf.constant([[0.5]], dtype=tf.float32),
+        'task_multiclass': tf.constant([[0.5, 0.25, 0.25]], dtype=tf.float32)
+    }
+    
+    # Prioritize task_binary by 10x
+    loss_fn = trainer._build_loss_function(
+        num_tasks=2,
+        class_weights=[{0: 1.0, 1: 1.0}, {0: 1.0, 1: 1.0, 2: 1.0}],
+        task_weights=[10.0, 1.0] 
+    )
+    
+    loss = loss_fn(y_true, y_pred)
+    # Expected: (0.693 * 10 + 0.693 * 1) / 2 labels = 3.811
+    assert loss.numpy() == pytest.approx(3.811, abs=0.05)
+
+
+def test_warmup_call_compatibility(dummy_trainer):
+    """Verifies fix for WarmUp schedule call signature."""
+    dummy_trainer.config.use_warmup = True
+    dummy_trainer.config.use_lr_schedule = True
+    lr_schedule = dummy_trainer._build_lr_schedule(steps_per_epoch=100)
+    
+    # Ensure the schedule can be called with a step (standard Keras)
+    val = lr_schedule(tf.constant(10, dtype=tf.int64))
+    assert val > 0
