@@ -283,25 +283,28 @@ class Trainer:
             Configured optimizer
         """
         lr_schedule = self._build_lr_schedule(steps_per_epoch)
-        # fix: uses native keras 3 optimizers
         opt_type = self.config.optimizer_type.lower()
         
         if opt_type == 'adamw':
-            return tf.keras.optimizers.AdamW(
-                learning_rate=lr_schedule,
-                weight_decay=self.config.weight_decay_rate
-            )
+            optimizer = tf.keras.optimizers.AdamW(learning_rate=lr_schedule)
         elif opt_type == 'adam':
-            return tf.keras.optimizers.Adam(
-                learning_rate=lr_schedule
-            )
+            optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
         elif opt_type == 'sgd':
-            return tf.keras.optimizers.SGD(
-                learning_rate=lr_schedule,
-                momentum=0.9
-            )
+            optimizer = tf.keras.optimizers.SGD(learning_rate=lr_schedule)
+        elif opt_type == 'nadam':
+            optimizer = tf.keras.optimizers.Nadam(learning_rate=lr_schedule)
         else:
-            raise ValueError(f"Unknown optimizer_type: {self.config.optimizer_type}")
+            # Fallback to registry for exotic optimizers (Lion, Lamb, etc.)
+            optimizer = tf.keras.optimizers.get(opt_type)
+            optimizer.learning_rate = lr_schedule
+            
+        if hasattr(self.config, 'optimizer_kwargs'):
+            for key, value in self.config.optimizer_kwargs.items():
+                if hasattr(optimizer, key):
+                    setattr(optimizer, key, value)
+                    
+        return optimizer
+        
     
     def _find_optimal_thresholds(
         self,

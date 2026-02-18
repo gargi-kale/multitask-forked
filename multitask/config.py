@@ -7,7 +7,7 @@ the relevant functions.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, List, Optional
 
 
 @dataclass
@@ -37,6 +37,9 @@ class TrainingConfig:
     
     # Optimizer settings
     optimizer_type: str = 'adamw'  # 'adamw', 'adam', 'sgd'
+    
+    # optimizer hyperparameters
+    optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
     
     # Learning rate schedule settings
     use_lr_schedule: bool = True
