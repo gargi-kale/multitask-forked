@@ -285,24 +285,34 @@ class Trainer:
         lr_schedule = self._build_lr_schedule(steps_per_epoch)
         opt_type = self.config.optimizer_type.lower()
         
-        if opt_type == 'adamw':
-            optimizer = tf.keras.optimizers.AdamW(learning_rate=lr_schedule)
-        elif opt_type == 'adam':
-            optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
-        elif opt_type == 'sgd':
-            optimizer = tf.keras.optimizers.SGD(learning_rate=lr_schedule)
-        elif opt_type == 'nadam':
-            optimizer = tf.keras.optimizers.Nadam(learning_rate=lr_schedule)
+        # common optimizers
+        optimizer_map = {
+            'adamw': tf.keras.optimizers.AdamW,
+            'adam': tf.keras.optimizers.Adam,
+            'sgd': tf.keras.optimizers.SGD,
+            'nadam': tf.keras.optimizers.Nadam
+        }
+        
+        optimizer_kwargs = getattr(self.config, 'optimizer_kwargs', {}) or {}
+        
+        if opt_type in optimizer_map:
+            optimizer = optimizer_map[opt_type](
+                learning_rate=lr_schedule,
+                **optimizer_kwargs
+            )
         else:
-            # Fallback to registry for exotic optimizers (Lion, Lamb, etc.)
-            optimizer = tf.keras.optimizers.get(opt_type)
-            optimizer.learning_rate = lr_schedule
+            # get optimizer from keras registry for additional optimizers
+            try:
+                optimizer = tf.keras.optimizers.get(opt_type)
+            except ValueError:
+                raise ValueError(f"Unknown optimizer_type: {self.config.optimizer_type}")
             
-        if hasattr(self.config, 'optimizer_kwargs'):
-            for key, value in self.config.optimizer_kwargs.items():
+            for key, val in optimizer_kwargs.items():
                 if hasattr(optimizer, key):
-                    setattr(optimizer, key, value)
-                    
+                    setattr(optimizer, key, val)
+                else:
+                    raise ValueError(f"Optimizer {opt_type} does not have attribute '{key}' for optimizer_kwargs")
+        
         return optimizer
         
     

@@ -41,9 +41,9 @@ optimizers = [
     "nadam",
     "adagrad",
     "adadelta",
-    # "adamax", # cpu-only kernel
-    # "ftrl", # cpu-only kernel
-    # "lion", # not avalable
+    "adamax", 
+    "ftrl",
+    "lion", 
     # 'lamb', # not available
     # 'muon', # not available
     # 'lossscaleoptimizer', # this is a wrapper, not a standalone optimizer
