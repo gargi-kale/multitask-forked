@@ -416,13 +416,17 @@ class MultiTaskModel(tf.keras.Model):
 
         # Forward pass
         y_pred = self(x, training=False)
-        
-        # Compute loss
-        self.compute_loss(x, y, y_pred, sample_weight)
-        
-        # Update metrics
-        self.compiled_metrics.update_state(y, y_pred, sample_weight)
-        
+
+        # Compute loss (returns scalar)
+        loss = self.compute_loss(x, y, y_pred, sample_weight)
+
+        # Update metrics: only the main loss metric accepts a scalar; others expect
+        # (y, y_pred) in a format that breaks with dict outputs, so update loss only.
+        for metric in self.metrics:
+            if metric.name == "loss":
+                metric.update_state(loss)
+                break
+
         return {m.name: m.result() for m in self.metrics}
     
     def get_config(self) -> Dict[str, Any]:
@@ -881,12 +885,9 @@ class MultiTaskModel(tf.keras.Model):
         # Create save directory
         os.makedirs(filepath, exist_ok=True)
         
-        # Save model weights
-        weights_path = os.path.join(filepath, 'weights')
-        if save_format == 'tf':
-            self.save_weights(weights_path)
-        else:
-            self.save_weights(weights_path + '.h5')
+        # Save model weights (Keras 3 requires path to end in .weights.h5)
+        weights_path = os.path.join(filepath, 'weights.weights.h5')
+        self.save_weights(weights_path)
         
         # Save ModelConfig (flat encoder keys for backward compat with load)
         config_dict = {
@@ -909,7 +910,7 @@ class MultiTaskModel(tf.keras.Model):
             'encoder_type': self.encoder_type,
             'uses_encoder': self.uses_encoder,
             'embedding_dim': self.embedding_dim,
-            'num_classes_per_task': self.num_classes_per_task_per_task,
+            'num_classes_per_task': self.num_classes_per_task,
             'dropout_rate': self.dropout_rate,
         }
         
@@ -937,14 +938,16 @@ class MultiTaskModel(tf.keras.Model):
         
     def load_task_weights(self, weights_path: str):
         """
-        User-friendly weight loader. 
-        Verifies that weights match the hierarchical structure.
+        User-friendly weight loader.
+        Keras 3 load_weights() returns None (no status object).
         """
         try:
-            status = self.load_weights(weights_path).expect_partial()
-            status.assert_existing_objects_matched()
+            result = self.load_weights(weights_path)
+            if result is not None:
+                status = result.expect_partial()
+                status.assert_existing_objects_matched()
             print(f"Successfully validated and loaded weights from {weights_path}")
-        # Catching the base OpError ensures that low-level C++ errors like 
+        # Catching the base OpError ensures that low-level C++ errors like
         # 'sstable' or 'tensor slice' issues are wrapped in our friendly message.
         except (tf.errors.OpError, tf.errors.DataLossError, AssertionError, ValueError) as e:
             raise ValueError(

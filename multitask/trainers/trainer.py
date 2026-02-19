@@ -484,7 +484,7 @@ class Trainer:
         for task_idx, task_name in enumerate(sorted(task_names)):
             labels = np.array(task_labels[task_name])
             task_type = self.model.config.get_task_type(task_idx)
-            num_classes = self.model.config.get_num_classes_per_task_per_task(task_idx)
+            num_classes = self.model.config.get_num_classes_per_task(task_idx)
             
             if len(labels) == 0:
                 # No valid labels - use uniform weights
@@ -694,7 +694,7 @@ class Trainer:
             print(f"  Batch size: {self.config.batch_size}")
             print(f"  Learning rate: {self.config.learning_rate}")
             print(f"  Weight decay: {self.config.weight_decay_rate}")
-            print(f"  Dropout: {self.config.dropout_rate_rate}")
+            print(f"  Dropout rate: {self.config.dropout_rate}")
             print(f"  Steps per epoch: {steps_per_epoch}\n")
             
             self.history = self.model.fit(

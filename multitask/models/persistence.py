@@ -135,18 +135,20 @@ def load_model(
     dummy_input = _get_build_dummy_input(model, metadata)
     _ = model(dummy_input, training=False)
     
-    # Load weights
-    weights_path = os.path.join(filepath, 'weights')
-    # check for .index file or the exact path or .h5
-    has_index = os.path.exists(weights_path + '.index')
-    has_direct = os.path.exists(weights_path)
-    has_h5 = os.path.exists(weights_path + '.h5')
-    
-    if has_index or has_direct or has_h5:
-        # use the new wrapper to ensure the file is valid for this model
-        model.load_task_weights(weights_path)
+    # Load weights (Keras 3 uses .weights.h5; support legacy paths for backward compat)
+    weights_path_h5 = os.path.join(filepath, 'weights.weights.h5')
+    weights_path_legacy = os.path.join(filepath, 'weights')
+    has_new = os.path.exists(weights_path_h5)
+    has_index = os.path.exists(weights_path_legacy + '.index')
+    has_direct = os.path.exists(weights_path_legacy)
+    has_h5 = os.path.exists(weights_path_legacy + '.h5')
+
+    if has_new:
+        model.load_task_weights(weights_path_h5)
+    elif has_index or has_direct or has_h5:
+        model.load_task_weights(weights_path_legacy)
     else:
-        raise ValueError(f"Weights file not found: {weights_path}")
+        raise ValueError(f"Weights file not found: {filepath} (expected weights.weights.h5 or legacy weights/weights.h5)")
     
     # Load thresholds if available
     thresholds = None
