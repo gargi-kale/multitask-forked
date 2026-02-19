@@ -109,7 +109,7 @@ def load_model(
     _ = model(dummy_input, training=False)
     
     # Load weights
-    weights_path = os.path.join(filepath, 'weights')
+    weights_path = os.path.join(filepath, 'weights.weights.h5')
     # check for .index file or the exact path or .h5
     has_index = os.path.exists(weights_path + '.index')
     has_direct = os.path.exists(weights_path)

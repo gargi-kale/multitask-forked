@@ -3,7 +3,7 @@ Multi-task learning model with hierarchical branching.
 
 This module implements a flexible hierarchical branching architecture for multi-task learning.
 """
-
+import os
 import copy
 import tensorflow as tf
 from typing import Optional, Union, Dict, List, Any, Tuple
@@ -340,8 +340,39 @@ class MultiTaskModel(tf.keras.Model):
         # Compute loss
         self.compute_loss(x, y, y_pred, sample_weight)
         
+        task_names = self.task_names or [f'task_{i}' for i in range(self.config.total_outputs)]
+
+        for metric in self.metrics:
+            if metric.name == 'loss' or metric.name.endswith('_loss'):
+                continue  # already handled by compute_loss
+
+            # Find which task this metric belongs to by prefix matching
+            matched_task = next(
+                (t for t in task_names if metric.name.startswith(t)),
+                None
+            )
+
+            if matched_task is None or matched_task not in y or matched_task not in y_pred:
+                continue
+
+            y_true = y[matched_task]
+            y_hat = y_pred[matched_task]
+
+            # Mask out -1 labels (unlabeled samples)
+            mask = tf.not_equal(tf.reshape(y_true, [-1]), -1)
+            if tf.reduce_any(mask):
+                y_true_masked = tf.boolean_mask(y_true, mask)
+                y_hat_masked  = tf.boolean_mask(y_hat,  mask)
+                metric.update_state(y_true_masked, y_hat_masked)
         # Update metrics
-        self.compiled_metrics.update_state(y, y_pred, sample_weight)
+        # self.compiled_metrics.update_state(y, y_pred, sample_weight)
+        # for metric in self.metrics:
+        #     if metric.name == 'loss':
+        #         continue
+        #     try:
+        #         metric.update_state(y, y_pred, sample_weight)
+        #     except TypeError:
+        #         metric.update_state(y, y_pred)
         
         return {m.name: m.result() for m in self.metrics}
     
@@ -804,9 +835,13 @@ class MultiTaskModel(tf.keras.Model):
         # Save model weights
         weights_path = os.path.join(filepath, 'weights')
         if save_format == 'tf':
-            self.save_weights(weights_path, save_format='tf')
+            self.save_weights(weights_path + '.weights.h5')
         else:
-            self.save_weights(weights_path + '.h5', save_format='h5')
+            self.save_weights(weights_path + '.h5')
+        # if save_format == 'tf':
+        #     self.save_weights(weights_path)
+        # else:
+        #     self.save_weights(weights_path + '.h5')
         
         # Save ModelConfig
         config_dict = {
@@ -851,18 +886,24 @@ class MultiTaskModel(tf.keras.Model):
         print(f"  - Metadata: {os.path.join(filepath, 'metadata.json')}")
         if thresholds is not None:
             print(f"  - Thresholds: {os.path.join(filepath, 'thresholds.json')}")
-        print(f"  - Weights: {weights_path}")
-        print(f"  - Config: {os.path.join(filepath, 'config.json')}")
-        print(f"  - Metadata: {os.path.join(filepath, 'metadata.json')}")
+        # print(f"  - Weights: {weights_path}")
+        # print(f"  - Config: {os.path.join(filepath, 'config.json')}")
+        # print(f"  - Metadata: {os.path.join(filepath, 'metadata.json')}")
         
     def load_task_weights(self, weights_path: str):
         """
         User-friendly weight loader. 
         Verifies that weights match the hierarchical structure.
         """
+        if not os.path.exists(weights_path):
+            for ext in ['.weights.h5', '.h5']:
+                if os.path.exists(weights_path + ext):
+                    weights_path = weights_path + ext
+                    break
         try:
-            status = self.load_weights(weights_path).expect_partial()
-            status.assert_existing_objects_matched()
+            # status = self.load_weights(weights_path).expect_partial()
+            # status.assert_existing_objects_matched()
+            self.load_weights(weights_path)
             print(f"Successfully validated and loaded weights from {weights_path}")
         # Catching the base OpError ensures that low-level C++ errors like 
         # 'sstable' or 'tensor slice' issues are wrapped in our friendly message.
