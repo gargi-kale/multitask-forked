@@ -28,7 +28,7 @@ def _get_build_dummy_input(model: MultiTaskModel, metadata: dict):
         Dummy input (Tensor or dict of Tensors) for model(dummy_input, training=False).
     """
     DUMMY_INPUT_BUILDERS = {
-        EncoderInputType.HUGGINGFACE: lambda: {
+        EncoderInputType.HUGGINGFACE_TOKENS: lambda: {
             'input_ids': tf.zeros((1, 128), dtype=tf.int32),
             'attention_mask': tf.ones((1, 128), dtype=tf.int32),
             'token_type_ids': tf.zeros((1, 128), dtype=tf.int32),
