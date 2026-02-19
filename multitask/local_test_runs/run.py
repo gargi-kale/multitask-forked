@@ -22,6 +22,7 @@ import pandas as pd
 import tensorflow as tf
 import numpy as np
 import os
+import shutil
 import argparse
 import sys
 
@@ -123,7 +124,7 @@ def load_train_val_data(task_names, batch_size=32):
     return train_ds, val_ds
 
 
-def verify_openai_encoder(base_model):
+def verify_openai_encoder(base_model, embeddings_only: bool):
     """
     Verify OpenAI encoder: check API key, fetch test embeddings, save to file,
     print stats, and run a full model forward pass.
@@ -173,6 +174,9 @@ def verify_openai_encoder(base_model):
 
         print("✓ Successfully received embeddings")
         print(f"\nEmbedding shape: {embeddings.shape}")
+
+        if embeddings_only:
+            return
 
         sample_values = embeddings.numpy()[0][:10]
         print("\nSample embedding values (first 10 dims):")
@@ -251,9 +255,21 @@ def run_predictions(model, batch_size=32):
 # -----------------------------------------------------------------------------
 # Main entry
 # -----------------------------------------------------------------------------
-def main(encoder_type: str, use_existing: bool, model_name: str | None = None):
-    """Run the training/prediction pipeline for the chosen encoder."""
+def main(
+    encoder_type: str, 
+    use_existing: bool, 
+    model_name: str | None = None, 
+    clear_cache: bool = False,
+    embeddings_only: bool = False
+):
+    """
+    Run the training/prediction pipeline for the chosen encoder.
+    """
+
     if encoder_type == 'universal-sentence-encoder':
+        if clear_cache and os.path.isdir(tfhub_cache):
+            shutil.rmtree(tfhub_cache)
+            print(f"Cleared TFHub cache at {tfhub_cache}")
         os.makedirs(tfhub_cache, exist_ok=True)
         os.environ.setdefault('TFHUB_CACHE_DIR', tfhub_cache)
 
@@ -271,6 +287,15 @@ def main(encoder_type: str, use_existing: bool, model_name: str | None = None):
         print(f"Loading existing model from {model_path}...")
         return load_model(model_path)
 
+    if embeddings_only:
+        if encoder_type != 'openai':
+            print("Warning: --embeddings-only is only supported with --openai. Ignoring.")
+        else:
+            print("Creating model...")
+            model = create_base_model(config)
+            verify_openai_encoder(model, embeddings_only=True)
+            return None
+
     train_dataset, val_dataset = load_train_val_data(task_names)
     if model_exists:
         print(f"Note: Existing model at {model_path} will be overwritten.")
@@ -278,7 +303,7 @@ def main(encoder_type: str, use_existing: bool, model_name: str | None = None):
     print("Creating model...")
     model = create_base_model(config)
     if encoder_type == 'openai':
-        verify_openai_encoder(model)
+        verify_openai_encoder(model, embeddings_only)
 
     return run_training(model, train_dataset, val_dataset, num_tasks, model_path)
 
@@ -327,6 +352,16 @@ if __name__ == '__main__':
         help='Encoder model (--openai: e.g. "openai:text-embedding-3-small" or "text-embedding-3-small"; '
              '--pytorch-frozen: e.g. "knowledgator/Llama-encoder-1.0B"). Uses script default if omitted.',
     )
+    parser.add_argument(
+        '--clear-cache',
+        action='store_true',
+        help='Clear TFHub cache before running (only applies with --universal-sentence-encoder). Sometimes needed if file is corrupted or training doesn\'t complete.',
+    )
+    parser.add_argument(
+        '--embeddings-only',
+        action='store_true',
+        help='Only get embeddings. Don\'t run training or predictions.'
+    )
     args = parser.parse_args()
 
     encoder_type = (
@@ -334,13 +369,17 @@ if __name__ == '__main__':
         else 'pytorch-frozen' if args.pytorch_frozen
         else 'universal-sentence-encoder'
     )
-    model, thresholds = main(
+    result = main(
         encoder_type=encoder_type,
         use_existing=args.use_existing,
         model_name=args.model_name,
+        clear_cache=args.clear_cache,
+        embeddings_only=args.embeddings_only
     )
 
-    print("Making predictions...")
-    predictions = run_predictions(model)
-    print("Predictions completed!")
-    print(f"Prediction shapes: {[f'{k}: {v.shape}' for k, v in predictions.items()]}")
+    if result is not None:
+        model, thresholds = result
+        print("Making predictions...")
+        predictions = run_predictions(model)
+        print("Predictions completed!")
+        print(f"Prediction shapes: {[f'{k}: {v.shape}' for k, v in predictions.items()]}")
