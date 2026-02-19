@@ -136,12 +136,6 @@ class HFInferenceEncoder(APIEncoder):
 
     Supported models: https://huggingface.co/inference/models
     """
-    EMBEDDING_DIMS = {
-        'knowledgator/Llama-encoder-1.0B': 2048,
-        'intfloat/e5-mistral-7b-instruct': 4096,
-        'Salesforce/SFR-Embedding-Mistral': 4096
-    }
-
     def __init__(self, model_name: str, **kwargs):
         embedding_dim = self.EMBEDDING_DIMS.get(model_name)
         if embedding_dim is None:
