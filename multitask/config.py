@@ -171,7 +171,7 @@ class EncoderConfig:
         
         # Default fallback for bare model names
         else:
-            self.encoder_integration = EncoderIntegration.HUGGINGFACE
+            self.encoder_integration = EncoderIntegration.HUGGINGFA
 
 
 @dataclass
@@ -201,6 +201,9 @@ class TrainingConfig:
     
     # Optimizer settings
     optimizer_type: str = 'adam'  # 'adamw', 'adam', 'sgd'
+    
+    # optimizer hyperparameters
+    optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
     
     # Learning rate schedule settings
     use_lr_schedule: bool = True

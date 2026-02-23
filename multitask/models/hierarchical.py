@@ -3,7 +3,7 @@ Multi-task learning model with hierarchical branching.
 
 This module implements a flexible hierarchical branching architecture for multi-task learning.
 """
-
+import os
 import copy
 import tensorflow as tf
 from typing import Optional, Union, Dict, List, Any, Tuple
@@ -932,15 +932,20 @@ class MultiTaskModel(tf.keras.Model):
         print(f"  - Metadata: {os.path.join(filepath, 'metadata.json')}")
         if thresholds is not None:
             print(f"  - Thresholds: {os.path.join(filepath, 'thresholds.json')}")
-        print(f"  - Weights: {weights_path}")
-        print(f"  - Config: {os.path.join(filepath, 'config.json')}")
-        print(f"  - Metadata: {os.path.join(filepath, 'metadata.json')}")
+        # print(f"  - Weights: {weights_path}")
+        # print(f"  - Config: {os.path.join(filepath, 'config.json')}")
+        # print(f"  - Metadata: {os.path.join(filepath, 'metadata.json')}")
         
     def load_task_weights(self, weights_path: str):
         """
         User-friendly weight loader.
         Keras 3 load_weights() returns None (no status object).
         """
+        if not os.path.exists(weights_path):
+            for ext in ['.weights.h5', '.h5']:
+                if os.path.exists(weights_path + ext):
+                    weights_path = weights_path + ext
+                    break
         try:
             result = self.load_weights(weights_path)
             if result is not None:

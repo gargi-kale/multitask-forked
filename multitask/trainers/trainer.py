@@ -303,25 +303,38 @@ class Trainer:
             Configured optimizer
         """
         lr_schedule = self._build_lr_schedule(steps_per_epoch)
-        # fix: uses native keras 3 optimizers
         opt_type = self.config.optimizer_type.lower()
         
-        if opt_type == 'adamw':
-            return tf.keras.optimizers.AdamW(
+        # common optimizers
+        optimizer_map = {
+            'adamw': tf.keras.optimizers.AdamW,
+            'adam': tf.keras.optimizers.Adam,
+            'sgd': tf.keras.optimizers.SGD,
+            'nadam': tf.keras.optimizers.Nadam
+        }
+        
+        optimizer_kwargs = getattr(self.config, 'optimizer_kwargs', {}) or {}
+        
+        if opt_type in optimizer_map:
+            optimizer = optimizer_map[opt_type](
                 learning_rate=lr_schedule,
-                weight_decay=self.config.weight_decay_rate
-            )
-        elif opt_type == 'adam':
-            return tf.keras.optimizers.Adam(
-                learning_rate=lr_schedule
-            )
-        elif opt_type == 'sgd':
-            return tf.keras.optimizers.SGD(
-                learning_rate=lr_schedule,
-                momentum=0.9
+                **optimizer_kwargs
             )
         else:
-            raise ValueError(f"Unknown optimizer_type: {self.config.optimizer_type}")
+            # get optimizer from keras registry for additional optimizers
+            try:
+                optimizer = tf.keras.optimizers.get(opt_type)
+            except ValueError:
+                raise ValueError(f"Unknown optimizer_type: {self.config.optimizer_type}")
+            
+            for key, val in optimizer_kwargs.items():
+                if hasattr(optimizer, key):
+                    setattr(optimizer, key, val)
+                else:
+                    raise ValueError(f"Optimizer {opt_type} does not have attribute '{key}' for optimizer_kwargs")
+        
+        return optimizer
+        
     
     def _find_optimal_thresholds(
         self,
