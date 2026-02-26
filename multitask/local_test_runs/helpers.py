@@ -15,7 +15,7 @@ def dataframe_to_dataset(df, task_names, batch_size=32, shuffle=False):
     """
     # Extract texts and labels
     # For Universal Sentence Encoder, we need to ensure texts are strings
-    texts = df['text'].astype(str).tolist()  # Convert to list to preserve strings
+    texts = [str(t) if t is not None and t == t else "" for t in df['text'].tolist()]  # Convert to list to preserve strings
     labels_dict = {}
     
     for task_name in task_names:
