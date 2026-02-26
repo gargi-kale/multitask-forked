@@ -185,39 +185,39 @@ def verify_openai_encoder(base_model, embeddings_only: bool):
     try:
         if embeddings_only:
             # Generate embeddings for all no_prop_overlap_*.csv files
-            print("\nGenerating embeddings for all no_prop_overlap_*.csv files...")
-            csv_files = sorted(glob.glob(os.path.join(data_path, "no_prop_overlap_*.csv")))
+            # print("\nGenerating embeddings for all no_prop_overlap_*.csv files...")
+            # csv_files = sorted(glob.glob(os.path.join(data_path, "no_prop_overlap_*.csv")))
             
-            if not csv_files:
-                print(f"  No CSV files found in {data_path}")
-                return
+            # if not csv_files:
+            #     print(f"  No CSV files found in {data_path}")
+            #     return
             
-            for csv_path in csv_files:
-                file_name = Path(csv_path).name
-                # Extract split name (train, val, test)
-                split = file_name.replace("no_prop_overlap_", "").replace(".csv", "")
+            # for csv_path in csv_files:
+            #     file_name = Path(csv_path).name
+            #     # Extract split name (train, val, test)
+            #     split = file_name.replace("no_prop_overlap_", "").replace(".csv", "")
                 
-                print(f"\n  Processing {file_name}...")
+            #     print(f"\n  Processing {file_name}...")
                 
-                # Load texts
-                texts = _load_texts_from_csv(csv_path)
-                if not texts:
-                    print(f"    ✗ No texts found in {file_name}")
-                    continue
+            #     # Load texts
+            #     texts = _load_texts_from_csv(csv_path)
+            #     if not texts:
+            #         print(f"    ✗ No texts found in {file_name}")
+            #         continue
                 
-                print(f"    Loaded {len(texts)} texts")
+            #     print(f"    Loaded {len(texts)} texts")
                 
-                # Get embeddings
-                print(f"    Generating embeddings...")
-                embeddings = _batch_embeddings(texts, base_model.encoder, batch_size=50)
+            #     # Get embeddings
+            #     print(f"    Generating embeddings...")
+            #     embeddings = _batch_embeddings(texts, base_model.encoder, batch_size=50)
                 
-                # Save embeddings
-                output_path = os.path.join(data_path, f"openai_embeddings_{split}.npy")
-                np.save(output_path, embeddings)
-                print(f"    ✓ Saved to {output_path}")
-                print(f"      Shape: {embeddings.shape}")
+            #     # Save embeddings
+            #     output_path = os.path.join(data_path, f"openai_embeddings_{split}.npy")
+            #     np.save(output_path, embeddings)
+            #     print(f"    ✓ Saved to {output_path}")
+            #     print(f"      Shape: {embeddings.shape}")
             
-            print("\n✓ All embeddings generated successfully!")
+            # print("\n✓ All embeddings generated successfully!")
             return
         
         # Single test embedding (original behavior)
