@@ -649,7 +649,8 @@ class Trainer:
             # for joint optimization, implementing the core of multi-task learning
             self.model.compile(
                 optimizer=optimizer,
-                loss=loss_fn
+                loss=loss_fn,
+                jit_compile=False
             )
             
             # Setup callbacks
