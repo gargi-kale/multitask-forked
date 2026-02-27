@@ -16,6 +16,7 @@ Use --use-existing to load an existing model instead of training:
 import os
 os.environ['TF_XLA_FLAGS'] = '--tf_xla_enable_xla_devices=false'
 os.environ['TF_GPU_JIT_COMPILE'] = '0'
+os.environ['TF_DISABLE_JIT'] = '1'
 
 from multitask import ModelConfig, TrainingConfig, EncoderConfig, MultiTaskModel, Trainer
 from multitask import load_model
