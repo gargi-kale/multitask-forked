@@ -11,6 +11,11 @@ Use --use-existing to load an existing model instead of training:
     python -m multitask.local_test_runs.run --universal-sentence-encoder --use-existing
     python -m multitask.local_test_runs.run --openai --use-existing
 """
+# Disable XLA before TensorFlow loads. XLA GPU JIT does not support string tensors,
+# and our pipeline feeds text (strings) into the model. Must set env before any tf import.
+import os
+os.environ['TF_XLA_FLAGS'] = '--tf_xla_enable_xla_devices=false'
+os.environ['TF_GPU_JIT_COMPILE'] = '0'
 
 from multitask import ModelConfig, TrainingConfig, EncoderConfig, MultiTaskModel, Trainer
 from multitask import load_model
