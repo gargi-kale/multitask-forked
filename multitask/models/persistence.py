@@ -131,6 +131,8 @@ def load_model(
     print(f"Model loaded from {filepath}/")
     print(f"  - Encoder type: {model.encoder_type or 'embeddings'}")
     print(f"  - Tasks: {', '.join(model.config.task_names)}")
+    if model.config.has_pools:
+        print(f"  - Output pools: {', '.join(model.config.pool_names)}")
     print(f"  - Trainable parameters: {model.count_params():,}")
     if thresholds:
         print(f"  - Thresholds: {list(thresholds.keys())}")
