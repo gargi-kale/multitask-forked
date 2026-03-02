@@ -3,15 +3,20 @@ import tensorflow as tf
 import numpy as np
 import os
 import requests
+import diskcache
 
 from huggingface_hub import InferenceClient
 
 class APIEncoder(tf.keras.layers.Layer):
-    """Base class for API encoders"""
-    def __init__(self, model_name: str, embedding_dim: int, **kwargs):
+    """Base class for API encoders. Embeddings are cached on disk so the same
+    inputs are not re-embedded across runs or epochs.
+    """
+    def __init__(self, model_name, embedding_dim, cache_dir=None, **kwargs):
         super().__init__(trainable=False, **kwargs)
         self.model_name = model_name
         self.embedding_dim = embedding_dim
+        self.cache_dir = cache_dir or f".embedding_cache/{model_name.replace('/', '_')}"
+        self._cache = diskcache.Cache(self.cache_dir)
 
     @abstractmethod
     def _embed_texts(self, texts: list[str]) -> np.ndarray:
@@ -48,17 +53,23 @@ class APIEncoder(tf.keras.layers.Layer):
 
     def _embed_texts_wrapper(self, inputs_tensor):
         """
-        Wrapper to convert tensor to list and call API.
+        Wrapper to convert tensor to list, check disk cache, and call API if needed.
         """
         texts = [t.decode('utf-8') for t in inputs_tensor.numpy()]
-        embeddings = self._embed_texts(texts)
-        return embeddings.astype(np.float32)
+        key = tuple(texts)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        embeddings = self._embed_texts(texts).astype(np.float32)
+        self._cache[key] = embeddings
+        return embeddings
 
     def get_config(self):
         config = super().get_config()
         config.update({
             'model_name': self.model_name,
-            'embedding_dim': self.embedding_dim
+            'embedding_dim': self.embedding_dim,
+            'cache_dir': self.cache_dir,
         })
         return config
 
@@ -196,9 +207,9 @@ class OpenAIEncoder(APIEncoder):
         return self._client
     
     def _embed_texts(self, texts: list[str]) -> np.ndarray:
-        response = self._client.embeddings.create(
-            model = self.model_name,
-            input = texts
+        response = self.client.embeddings.create(
+            model=self.model_name,
+            input=texts
         )
         embeddings = [item.embedding for item in response.data]
         return np.array(embeddings)

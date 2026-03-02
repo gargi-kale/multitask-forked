@@ -686,7 +686,7 @@ class MultiTaskModel(tf.keras.Model):
                 
                 # ===== VALIDATE INPUTS =====
                 if self.uses_encoder:
-                    # Expecting dict (BERT, etc.) or tensor input
+                    # Expecting dict (BERT-style) or tensor input
                     if isinstance(inputs, dict):
                         # Dict input (typical for BERT)
                         for key, value in inputs.items():
@@ -707,11 +707,19 @@ class MultiTaskModel(tf.keras.Model):
                                 )
                     elif tf.is_tensor(inputs):
                         # Tensor input
-                        if len(inputs.shape) < 2:
-                            raise ValueError(
-                                f"Input tensor has shape {inputs.shape}. "
-                                f"Expected at least 2D (batch_size, sequence_length)."
-                            )
+                        if self.encoder_input_type == EncoderInputType.RAW_STRING:
+                            # Raw string encoders (e.g., API or USE) expect 1D [batch_size] string tensors
+                            if len(inputs.shape) != 1:
+                                raise ValueError(
+                                    f"Raw string encoder input has shape {inputs.shape}. "
+                                    f"Expected 1D tensor [batch_size] of dtype tf.string."
+                                )
+                        else:
+                            if len(inputs.shape) < 2:
+                                raise ValueError(
+                                    f"Input tensor has shape {inputs.shape}. "
+                                    f"Expected at least 2D (batch_size, sequence_length)."
+                                )
                     else:
                         raise ValueError(
                             f"Input must be dict or tensor. Got {type(inputs)}"

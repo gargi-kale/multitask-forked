@@ -49,6 +49,23 @@ except ImportError:
     HAS_TRANSFORMERS = False
     AutoTokenizer = None
 
+import os
+
+# Load .env so OPENAI_API_KEY is available for OpenAI encoder tests
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+try:
+    from openai import OpenAI  # noqa: F401
+    HAS_OPENAI = True
+except ImportError:
+    HAS_OPENAI = False
+
+OPENAI_API_KEY_SET = bool(os.environ.get("OPENAI_API_KEY"))
+
 from multitask.config import EncoderConfig, EncoderInputType, EncoderIntegration, ModelConfig
 
 pytestmark = [
@@ -174,3 +191,63 @@ class TestHuggingFaceEncoderIntegration:
 
     def test_bert_base_multilingual_cased(self):
         self._hf_forward("bert-base-multilingual-cased")
+
+
+# --- OpenAI API encoder ---
+
+@pytest.mark.skipif(not HAS_OPENAI, reason="openai package not installed (pip install openai)")
+@pytest.mark.skipif(not OPENAI_API_KEY_SET, reason="OPENAI_API_KEY not set (set for live API tests)")
+class TestOpenAIEncoderIntegration:
+    """
+    OpenAI encoder: build model with openai:<model> identifier, raw string input, run forward.
+    Uses OPENAI_API_KEY from the environment.
+    """
+
+    def test_openai_embedding_forward(self):
+        from multitask.models.hierarchical import MultiTaskModel
+        config = _get_base_config()
+        # Identifier form "openai:model_name" so EncoderConfig resolves integration and model name
+        model = MultiTaskModel(config=config, encoder="openai:text-embedding-3-small")
+        assert model.encoder_type == "openai"
+        assert model.uses_encoder is True
+        assert model.encoder_input_type == EncoderInputType.RAW_STRING
+
+        inputs = tf.constant(SAMPLE_TEXTS)
+        out = model(inputs, training=False)
+        assert isinstance(out, dict)
+        assert len(out) == 2
+        assert out["task_0"].shape == (BATCH_SIZE, 1)
+        assert out["task_1"].shape == (BATCH_SIZE, 1)
+
+    def test_openai_embedding_forward_second_call_uses_cache(self):
+        """Second forward with same inputs should use disk cache (no extra API call)."""
+        from multitask.models.hierarchical import MultiTaskModel
+        config = _get_base_config()
+        model = MultiTaskModel(config=config, encoder="openai:text-embedding-3-small")
+        cache = model.encoder._cache
+        cache.stats(enable=True, reset=True)  # enable stats and zero counters
+
+        inputs = tf.constant(SAMPLE_TEXTS)
+        before_hits, before_misses = cache.stats()
+        out1 = model(inputs, training=False)
+        mid_hits, mid_misses = cache.stats()
+
+        # First forward must either miss (cold cache) or hit (warm cache) exactly once.
+        assert (mid_hits + mid_misses) - (before_hits + before_misses) == 1, (
+            f"Expected exactly one cache access on first forward; "
+            f"before=(hits={before_hits}, misses={before_misses}), "
+            f"after=(hits={mid_hits}, misses={mid_misses})"
+        )
+
+        out2 = model(inputs, training=False)
+        after_hits, after_misses = cache.stats()
+
+        # Second forward must add exactly one hit and no additional misses.
+        assert after_hits == mid_hits + 1 and after_misses == mid_misses, (
+            "Second forward should be served from cache: "
+            f"mid=(hits={mid_hits}, misses={mid_misses}), "
+            f"after=(hits={after_hits}, misses={after_misses})"
+        )
+
+        tf.debugging.assert_near(out1["task_0"], out2["task_0"])
+        tf.debugging.assert_near(out1["task_1"], out2["task_1"])
