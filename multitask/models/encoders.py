@@ -72,74 +72,7 @@ class APIEncoder(tf.keras.layers.Layer):
             'cache_dir': self.cache_dir,
         })
         return config
-
-class PyTorchFrozenEncoder(APIEncoder):
-    """
-    Wrap a PyTorch model as a frozen TensorFlow layer.
-
-    Lets you use a PyTorch model inside a TensorFlow/Keras pipeline, but without 
-    gradient flow (hence "frozen"—the weights never update).
-    """
-
-    def __init__(self, model_name: str, **kwargs):
-        # Get embedding dim from config
-        from transformers import AutoConfig
-        config = AutoConfig.from_pretrained(model_name)
-        embedding_dim = config.hidden_size 
-
-        super().__init__(model_name=model_name, embedding_dim=embedding_dim, **kwargs)
-        self._torch_model = None
-        self._tokenizer = None
-
-    @property
-    def torch_model(self):
-        if self._torch_model is None:
-            import torch
-            from transformers import AutoModel
-            self._torch_model = AutoModel.from_pretrained(
-                self.model_name,
-                trust_remote_code=True
-            )
-            self._torch_model.eval()
-
-        return self._torch_model
-
-    @property
-    def tokenizer(self):
-        if self._tokenizer is None:
-            from transformers import AutoTokenizer
-            self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            
-            # Llama-based models don't have a pad token
-            if self._tokenizer.pad_token is None:
-                self._tokenizer.pad_token = self._tokenizer.eos_token
         
-        return self._tokenizer
-    
-    def _embed_texts(self, texts: list[str]) -> np.ndarray:
-        import torch
-        
-        batch = self.tokenizer(
-            texts,
-            padding=True,
-            truncation=True,
-            max_length=512,
-            return_tensors='pt' # PyTorch tensors
-        )
-
-        with torch.no_grad():
-            outputs = self.torch_model(**batch)
-
-        # Mean pooling over sequence length
-        attention_mask = batch['attention_mask'].unsqueeze(-1)
-        hidden_states = outputs.last_hidden_state
-        masked = hidden_states * attention_mask
-        summed = masked.sum(dim=1)
-        counts = attention_mask.sum(dim=1)
-        embeddings = summed / counts
-
-        return embeddings.numpy()
-
 
 class HFInferenceEncoder(APIEncoder):
     """

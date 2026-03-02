@@ -4,7 +4,6 @@ Local test run script for multitask model.
 Run from the project root. Choose one encoder (required):
     python -m multitask.local_test_runs.run --universal-sentence-encoder   # default
     python -m multitask.local_test_runs.run --openai   # requires OPENAI_API_KEY
-    python -m multitask.local_test_runs.run --pytorch-frozen   # PyTorch frozen encoder (e.g. Llama)
     python -m multitask.local_test_runs.run --custom-embeddings --train-embeddings X --val-embeddings Y --test-embeddings Z -d DIM
 
 Use --use-existing to load an existing model instead of training:
@@ -20,8 +19,6 @@ os.environ['TF_DISABLE_JIT'] = '1'
 
 from multitask import ModelConfig, TrainingConfig, EncoderConfig, MultiTaskModel, Trainer
 from multitask import load_model
-from multitask.config import EncoderInputType
-from multitask.models.encoders import PyTorchFrozenEncoder
 from multitask.local_test_runs.helpers import dataframe_to_dataset, embeddings_and_labels_to_dataset
 
 import pandas as pd
@@ -62,7 +59,6 @@ TASKS = {
 }
 
 DEFAULT_OPENAI_MODEL = "openai:text-embedding-3-small"
-DEFAULT_PYTORCH_FROZEN_MODEL = "knowledgator/Llama-encoder-1.0B"
 
 
 def _get_encoder_config(
@@ -83,13 +79,6 @@ def _get_encoder_config(
             encoder_identifier=identifier,
             trainable_encoder=False,
             api_key=os.environ.get('OPENAI_API_KEY'),
-        )
-    if encoder_type == 'pytorch-frozen':
-        name = model_name or DEFAULT_PYTORCH_FROZEN_MODEL
-        return EncoderConfig(
-            encoder=PyTorchFrozenEncoder(name),
-            encoder_input_type=EncoderInputType.RAW_STRING,
-            trainable_encoder=False,
         )
     if encoder_type == 'custom-embeddings':
         return EncoderConfig(
@@ -127,7 +116,7 @@ def get_model_paths(encoder_type: str):
     """
     models_dir = os.path.join(project_root, 'models')
     os.makedirs(models_dir, exist_ok=True)
-    subdirs = {'openai': 'my_model_openai', 'pytorch-frozen': 'my_model_pytorch_frozen'}
+    subdirs = {'openai': 'my_model_openai'}
     subdir = subdirs.get(encoder_type, 'my_model_use')
     model_path = os.path.join(models_dir, subdir)
     weights_path = os.path.join(model_path, 'weights.weights.h5')
@@ -464,7 +453,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description=(
             'Train or load a multitask model. Choose one encoder: --universal-sentence-encoder, '
-            '--openai, --pytorch-frozen, or --custom-embeddings.'
+            '--openai, or --custom-embeddings.'
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -474,8 +463,6 @@ if __name__ == '__main__':
         python -m multitask.local_test_runs.run --openai
         python -m multitask.local_test_runs.run --openai --use-existing
         python -m multitask.local_test_runs.run --openai --model-name "openai:text-embedding-3-small"
-        python -m multitask.local_test_runs.run --pytorch-frozen
-        python -m multitask.local_test_runs.run --pytorch-frozen --model-name "knowledgator/Llama-encoder-1.0B"
         python -m multitask.local_test_runs.run --custom-embeddings --train-embeddings train.npy --val-embeddings val.npy --test-embeddings test.npy -d 1536
         """,
     )
@@ -489,11 +476,6 @@ if __name__ == '__main__':
         '--openai',
         action='store_true',
         help='Use OpenAI text-embedding-3-small (requires OPENAI_API_KEY).',
-    )
-    group.add_argument(
-        '--pytorch-frozen',
-        action='store_true',
-        help='Use PyTorch frozen encoder (knowledgator/Llama-encoder-1.0B).',
     )
     group.add_argument(
         '--custom-embeddings',
@@ -510,8 +492,7 @@ if __name__ == '__main__':
         type=str,
         default=None,
         metavar='NAME',
-        help='Encoder model (--openai: e.g. "openai:text-embedding-3-small" or "text-embedding-3-small"; '
-             '--pytorch-frozen: e.g. "knowledgator/Llama-encoder-1.0B"). Uses script default if omitted.',
+        help='Encoder model (--openai: e.g. "openai:text-embedding-3-small" or "text-embedding-3-small"). Uses script default if omitted.',
     )
     parser.add_argument(
         '--clear-cache',
@@ -559,7 +540,6 @@ if __name__ == '__main__':
 
     encoder_type = (
         'openai' if args.openai
-        else 'pytorch-frozen' if args.pytorch_frozen
         else 'universal-sentence-encoder' if args.universal_sentence_encoder
         else 'custom-embeddings' if args.custom_embeddings
         else 'universal-sentence-encoder'
