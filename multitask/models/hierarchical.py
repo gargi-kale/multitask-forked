@@ -378,54 +378,89 @@ class MultiTaskModel(tf.keras.Model):
         output_dict.update(pooled_outputs)
         
         return output_dict
-
-    def test_step(self, data):
-        """Custom evaluation step to handle dictionary outputs correctly."""
+    
+    def train_step(self, data):
+        """Custom training step to filter out pooled outputs before loss computation."""
         if len(data) == 3:
             x, y, sample_weight = data
         else:
             x, y = data
             sample_weight = None
 
-        # Forward pass
-        y_pred = self(x, training=False)
-        
-        # Compute loss
-        self.compute_loss(x, y, y_pred, sample_weight)
-        
         task_names = self.task_names or [f'task_{i}' for i in range(self.config.total_outputs)]
 
+        with tf.GradientTape() as tape:
+            # Forward pass (Outputs all keys, including pools)
+            y_pred = self(x, training=True)
+            
+            # --- KERAS 3 STRICT STRUCTURE FIX ---
+            # Filter out derived pools so y_pred matches the exact keys of y_true
+            y_pred_filtered = {k: y_pred[k] for k in task_names}
+            
+            # Compute loss using ONLY the matched architectural tasks
+            loss = self.compute_loss(x, y, y_pred_filtered, sample_weight)
+
+        # Compute gradients and update weights
+        gradients = tape.gradient(loss, self.trainable_variables)
+        self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
+
+        # Update metrics manually to support masked labels (-1)
         for metric in self.metrics:
             if metric.name == 'loss' or metric.name.endswith('_loss'):
-                continue  # already handled by compute_loss
+                continue
 
-            # Find which task this metric belongs to by prefix matching
-            matched_task = next(
-                (t for t in task_names if metric.name.startswith(t)),
-                None
-            )
-
-            if matched_task is None or matched_task not in y or matched_task not in y_pred:
+            matched_task = next((t for t in task_names if metric.name.startswith(t)), None)
+            if matched_task is None or matched_task not in y or matched_task not in y_pred_filtered:
                 continue
 
             y_true = y[matched_task]
-            y_hat = y_pred[matched_task]
+            y_hat = y_pred_filtered[matched_task]
 
-            # Mask out -1 labels (unlabeled samples)
             mask = tf.not_equal(tf.reshape(y_true, [-1]), -1)
             if tf.reduce_any(mask):
                 y_true_masked = tf.boolean_mask(y_true, mask)
                 y_hat_masked  = tf.boolean_mask(y_hat,  mask)
                 metric.update_state(y_true_masked, y_hat_masked)
-        # Update metrics
-        # self.compiled_metrics.update_state(y, y_pred, sample_weight)
-        # for metric in self.metrics:
-        #     if metric.name == 'loss':
-        #         continue
-        #     try:
-        #         metric.update_state(y, y_pred, sample_weight)
-        #     except TypeError:
-        #         metric.update_state(y, y_pred)
+
+        return {m.name: m.result() for m in self.metrics}
+
+    def test_step(self, data):
+        """Custom evaluation step to filter out pooled outputs before loss computation."""
+        if len(data) == 3:
+            x, y, sample_weight = data
+        else:
+            x, y = data
+            sample_weight = None
+
+        task_names = self.task_names or [f'task_{i}' for i in range(self.config.total_outputs)]
+
+        # Forward pass (Outputs all keys, including pools)
+        y_pred = self(x, training=False)
+        
+        # --- KERAS 3 STRICT STRUCTURE FIX ---
+        # Filter out derived pools so y_pred matches the exact keys of y_true
+        y_pred_filtered = {k: y_pred[k] for k in task_names}
+        
+        # Compute loss using ONLY the matched architectural tasks
+        self.compute_loss(x, y, y_pred_filtered, sample_weight)
+
+        # Update metrics manually to support masked labels (-1)
+        for metric in self.metrics:
+            if metric.name == 'loss' or metric.name.endswith('_loss'):
+                continue
+
+            matched_task = next((t for t in task_names if metric.name.startswith(t)), None)
+            if matched_task is None or matched_task not in y or matched_task not in y_pred_filtered:
+                continue
+
+            y_true = y[matched_task]
+            y_hat = y_pred_filtered[matched_task]
+
+            mask = tf.not_equal(tf.reshape(y_true, [-1]), -1)
+            if tf.reduce_any(mask):
+                y_true_masked = tf.boolean_mask(y_true, mask)
+                y_hat_masked  = tf.boolean_mask(y_hat,  mask)
+                metric.update_state(y_true_masked, y_hat_masked)
         
         return {m.name: m.result() for m in self.metrics}
     

@@ -1,5 +1,5 @@
 """
-Smoke test for output_pools feature using real data structure.
+Full test for output_pools feature using real data structure.
 
 Uses small subsets of the actual data (200 train / 200 val / 200 test)
 with TF-IDF embeddings instead of a transformer encoder so it runs
