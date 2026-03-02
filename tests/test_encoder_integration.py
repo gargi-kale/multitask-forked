@@ -51,7 +51,7 @@ except ImportError:
 
 import os
 
-# Load .env so OPENAI_API_KEY is available for OpenAI encoder tests
+# Load .env so OPENAI_API_KEY / COHERE_API_KEY / VOYAGE_API_KEY / HF_API_TOKEN are available for API encoder tests
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -64,7 +64,17 @@ try:
 except ImportError:
     HAS_OPENAI = False
 
-OPENAI_API_KEY_SET = bool(os.environ.get("OPENAI_API_KEY"))
+try:
+    from cohere import ClientV2  # noqa: F401
+    HAS_COHERE = True
+except ImportError:
+    HAS_COHERE = False
+
+try:
+    import voyageai  # noqa: F401
+    HAS_VOYAGE = True
+except ImportError:
+    HAS_VOYAGE = False
 
 from multitask.config import EncoderConfig, EncoderInputType, EncoderIntegration, ModelConfig
 
@@ -196,7 +206,6 @@ class TestHuggingFaceEncoderIntegration:
 # --- OpenAI API encoder ---
 
 @pytest.mark.skipif(not HAS_OPENAI, reason="openai package not installed (pip install openai)")
-@pytest.mark.skipif(not OPENAI_API_KEY_SET, reason="OPENAI_API_KEY not set (set for live API tests)")
 class TestOpenAIEncoderIntegration:
     """
     OpenAI encoder: build model with openai:<model> identifier, raw string input, run forward.
@@ -251,3 +260,80 @@ class TestOpenAIEncoderIntegration:
 
         tf.debugging.assert_near(out1["task_0"], out2["task_0"])
         tf.debugging.assert_near(out1["task_1"], out2["task_1"])
+
+
+# --- Cohere API encoder ---
+
+@pytest.mark.skipif(not HAS_COHERE, reason="cohere package not installed (pip install cohere)")
+class TestCohereEncoderIntegration:
+    """
+    Cohere encoder: build model with cohere:<model> identifier, raw string input, run forward.
+    Uses COHERE_API_KEY from the environment.
+    """
+
+    def test_cohere_embedding_forward(self):
+        from multitask.models.hierarchical import MultiTaskModel
+        config = _get_base_config()
+        model = MultiTaskModel(config=config, encoder="cohere:embed-english-v3.0")
+        assert model.encoder_type == "cohere"
+        assert model.uses_encoder is True
+        assert model.encoder_input_type == EncoderInputType.RAW_STRING
+
+        inputs = tf.constant(SAMPLE_TEXTS)
+        out = model(inputs, training=False)
+        assert isinstance(out, dict)
+        assert len(out) == 2
+        assert out["task_0"].shape == (BATCH_SIZE, 1)
+        assert out["task_1"].shape == (BATCH_SIZE, 1)
+
+
+# --- Voyage AI API encoder ---
+
+@pytest.mark.skipif(not HAS_VOYAGE, reason="voyageai package not installed (pip install voyageai)")
+class TestVoyageEncoderIntegration:
+    """
+    Voyage AI encoder: build model with voyage:<model> identifier, raw string input, run forward.
+    Uses VOYAGE_API_KEY from the environment.
+    """
+
+    def test_voyage_embedding_forward(self):
+        from multitask.models.hierarchical import MultiTaskModel
+        config = _get_base_config()
+        model = MultiTaskModel(config=config, encoder="voyage:voyage-3")
+        assert model.encoder_type == "voyage"
+        assert model.uses_encoder is True
+        assert model.encoder_input_type == EncoderInputType.RAW_STRING
+
+        inputs = tf.constant(SAMPLE_TEXTS)
+        out = model(inputs, training=False)
+        assert isinstance(out, dict)
+        assert len(out) == 2
+        assert out["task_0"].shape == (BATCH_SIZE, 1)
+        assert out["task_1"].shape == (BATCH_SIZE, 1)
+
+
+# --- HuggingFace Inference API encoder ---
+
+class TestHuggingFaceInferenceEncoderIntegration:
+    """
+    HuggingFace Inference API encoder: build model with huggingface_api:<model> identifier,
+    raw string input, run forward. Uses HF_API_TOKEN from the environment.
+    """
+
+    def test_huggingface_inference_embedding_forward(self):
+        from multitask.models.hierarchical import MultiTaskModel
+        config = _get_base_config()
+        model = MultiTaskModel(
+            config=config,
+            encoder="huggingface_api:sentence-transformers/all-MiniLM-L6-v2",
+        )
+        assert model.encoder_type == "huggingface_api"
+        assert model.uses_encoder is True
+        assert model.encoder_input_type == EncoderInputType.RAW_STRING
+
+        inputs = tf.constant(SAMPLE_TEXTS)
+        out = model(inputs, training=False)
+        assert isinstance(out, dict)
+        assert len(out) == 2
+        assert out["task_0"].shape == (BATCH_SIZE, 1)
+        assert out["task_1"].shape == (BATCH_SIZE, 1)

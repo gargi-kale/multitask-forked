@@ -7,6 +7,15 @@ import diskcache
 
 from huggingface_hub import InferenceClient
 
+# Optionally load environment variables (e.g., API keys) from a .env file
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    # dotenv is an optional dependency; skip if not installed
+    pass
+
 class APIEncoder(tf.keras.layers.Layer):
     """Base class for API encoders. Embeddings are cached on disk so the same
     inputs are not re-embedded across runs or epochs.
@@ -72,43 +81,53 @@ class APIEncoder(tf.keras.layers.Layer):
             'cache_dir': self.cache_dir,
         })
         return config
-        
+
 
 class HFInferenceEncoder(APIEncoder):
     """
-    Encoder using HuggingFace's API.
+    Encoder using HuggingFace Inference (InferenceClient / Inference Providers).
 
-    Supported models: https://huggingface.co/inference/models
+    Uses the huggingface_hub InferenceClient, which routes to Inference Providers
+    (the legacy serverless api-inference.huggingface.co endpoint returns 410 Gone).
+    Uses HF_API_TOKEN or HF_TOKEN from the environment.
     """
+    EMBEDDING_DIMS = {
+        "sentence-transformers/all-MiniLM-L6-v2": 384,
+        "sentence-transformers/all-mpnet-base-v2": 768,
+        "sentence-transformers/paraphrase-MiniLM-L3-v2": 384,
+        "sentence-transformers/all-MiniLM-L12-v2": 384,
+        "BAAI/bge-small-en-v1.5": 384,
+        "intfloat/e5-small-v2": 384,
+        "thenlper/gte-small": 384,
+    }
+
     def __init__(self, model_name: str, **kwargs):
         embedding_dim = self.EMBEDDING_DIMS.get(model_name)
         if embedding_dim is None:
-            raise ValueError(f"Unknown HuggingFace model: {model_name}. \
-                Known models: {list(self.EMBEDDING_DIMS.keys())}")
+            raise ValueError(
+                f"Unknown HuggingFace model: {model_name}. "
+                f"Known models: {list(self.EMBEDDING_DIMS.keys())}"
+            )
         super().__init__(model_name=model_name, embedding_dim=embedding_dim, **kwargs)
-        self.api_url = f"https://api-inference.huggingface.co/models/{model_name}"
+        self._client = None
+
+    @property
+    def client(self):
+        if self._client is None:
+            token = os.environ.get("HF_API_TOKEN") or os.environ.get("HF_TOKEN")
+            self._client = InferenceClient(token=token)
+        return self._client
 
     def _embed_texts(self, texts: list[str]) -> np.ndarray:
-        headers = {}
-        token = os.environ.get("HF_API_TOKEN")
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        
-        response = requests.post(
-            self.api_url,
-            headers=headers,
-            json={"inputs": texts, "options": {"wait_for_model": True}}
+        # feature_extraction accepts str or list of str; pass list for one batch
+        result = self.client.feature_extraction(
+            texts,
+            model=self.model_name,
         )
-        response.raise_for_status()
-        return np.array(response.json())
-
-    @staticmethod
-    def _check_available(model_name: str) -> bool:
-        import requests
-        response = requests.get(
-            f"https://api-inference.huggingface.co/status/{model_name}"
-        )
-        return response.status_code == 200 and response.json().get("loaded", False)
+        arr = np.array(result, dtype=np.float32)
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        return arr
 
 class OpenAIEncoder(APIEncoder):
     """Encoder using OpenAI's API"""
@@ -135,7 +154,14 @@ class OpenAIEncoder(APIEncoder):
             except ImportError:
                 raise ImportError(f"OpenAI library required. Install with: pip install openai.")
 
-            self._client = OpenAI() # uses OPENAI_API_KEY environment variable
+
+            api_key = os.environ.get("OPENAI_API_KEY")
+            if not api_key:
+                raise ValueError(
+                    "OPENAI_API_KEY environment variable is required for OpenAIEncoder."
+                )
+
+            self._client = OpenAI(api_key=api_key) # uses OPENAI_API_KEY environment variable
             # or maybe require user to set this value
         return self._client
     
@@ -148,9 +174,106 @@ class OpenAIEncoder(APIEncoder):
         return np.array(embeddings)
 
 class CohereEncoder(APIEncoder):
-    # TODO: Implement this.
-    pass
+    """Encoder using Cohere's Embed API. Uses COHERE_API_KEY environment variable."""
+    EMBEDDING_DIMS = {
+        'embed-english-v3.0': 1024,
+        'embed-english-light-v3.0': 384,
+        'embed-multilingual-v3.0': 1024,
+        'embed-multilingual-light-v3.0': 384,
+        'embed-english-v2.0': 4096,
+        'embed-english-light-v2.0': 1024,
+        'embed-multilingual-v2.0': 768,
+        'embed-v4.0': 1024,
+    }
+
+    def __init__(self, model_name: str = 'embed-english-v3.0', **kwargs):
+        embedding_dim = self.EMBEDDING_DIMS.get(model_name)
+        if embedding_dim is None:
+            raise ValueError(
+                f"Unknown Cohere model: {model_name}. "
+                f"Known models: {list(self.EMBEDDING_DIMS.keys())}"
+            )
+        super().__init__(model_name=model_name, embedding_dim=embedding_dim, **kwargs)
+        self._client = None
+
+    @property
+    def client(self):
+        if self._client is None:
+            try:
+                from cohere import ClientV2
+            except ImportError:
+                raise ImportError(
+                    "Cohere library required. Install with: pip install cohere."
+                )
+            api_key = os.environ.get("COHERE_API_KEY")
+            if not api_key:
+                raise ValueError(
+                    "COHERE_API_KEY environment variable is required for CohereEncoder."
+                )
+            self._client = ClientV2(api_key=api_key)
+        return self._client
+
+    def _embed_texts(self, texts: list[str]) -> np.ndarray:
+        kwargs = {
+            "texts": texts,
+            "model": self.model_name,
+            "input_type": "search_document",
+            "embedding_types": ["float"],
+        }
+        # output_dimension is only supported for embed-v4.0
+        if self.model_name == "embed-v4.0":
+            kwargs["output_dimension"] = self.embedding_dim
+        res = self.client.embed(**kwargs)
+        return np.array(res.embeddings.float, dtype=np.float32)
+
 
 class VoyageEncoder(APIEncoder):
-    # TODO: Implement this.
-    pass
+    """Encoder using Voyage AI's API. Uses VOYAGE_API_KEY environment variable."""
+    EMBEDDING_DIMS = {
+        'voyage-4-large': 1024,
+        'voyage-4': 1024,
+        'voyage-4-lite': 1024,
+        'voyage-code-3': 1024,
+        'voyage-context-3': 1024,
+        'voyage-finance-2': 1024,
+        'voyage-law-2': 1024,
+        'voyage-code-2': 1536,
+        'voyage-3': 1024,
+        'voyage-large-2': 1024,
+        'voyage-2': 1024,
+    }
+
+    def __init__(self, model_name: str = 'voyage-3', **kwargs):
+        embedding_dim = self.EMBEDDING_DIMS.get(model_name)
+        if embedding_dim is None:
+            raise ValueError(
+                f"Unknown Voyage model: {model_name}. "
+                f"Known models: {list(self.EMBEDDING_DIMS.keys())}"
+            )
+        super().__init__(model_name=model_name, embedding_dim=embedding_dim, **kwargs)
+        self._client = None
+
+    @property
+    def client(self):
+        if self._client is None:
+            try:
+                import voyageai
+            except ImportError:
+                raise ImportError(
+                    "Voyage AI library required. Install with: pip install voyageai."
+                )
+            api_key = os.environ.get("VOYAGE_API_KEY")
+            if not api_key:
+                raise ValueError(
+                    "VOYAGE_API_KEY environment variable is required for VoyageEncoder."
+                )
+            self._client = voyageai.Client(api_key=api_key)
+        return self._client
+
+    def _embed_texts(self, texts: list[str]) -> np.ndarray:
+        result = self.client.embed(
+            texts=texts,
+            model=self.model_name,
+            input_type="document",
+        )
+        return np.array(result.embeddings, dtype=np.float32)
