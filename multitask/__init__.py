@@ -17,7 +17,7 @@ __version__ = "0.1.0"
 __author__ = "Isaac D. Mehlhaff and Marco Morucci"
 
 # Import public API components
-from multitask.config import ModelConfig, TrainingConfig
+from multitask.config import ModelConfig, TrainingConfig, EncoderConfig
 from multitask.models import MultiTaskModel
 from multitask.models.persistence import load_model
 from multitask.trainers import Trainer
@@ -34,6 +34,7 @@ __all__ = [
     # Configuration
     "ModelConfig",
     "TrainingConfig",
+    "EncoderConfig",
     # Models
     "MultiTaskModel",
     "load_model",

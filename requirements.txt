@@ -6,3 +6,4 @@ pandas
 tensorflow-hub
 scikit-learn
 pyyaml
+diskcache

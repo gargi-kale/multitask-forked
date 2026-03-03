@@ -7,7 +7,15 @@ import os
 import copy
 import tensorflow as tf
 from typing import Optional, Union, Dict, List, Any, Tuple
-from multitask.config import ModelConfig
+from multitask.config import ModelConfig, EncoderConfig, EncoderInputType, EncoderIntegration
+from .encoders import OpenAIEncoder, CohereEncoder, VoyageEncoder, HFInferenceEncoder
+
+API_ENCODER_CLASSES = {
+    EncoderIntegration.OPENAI: OpenAIEncoder,
+    EncoderIntegration.COHERE: CohereEncoder,
+    EncoderIntegration.VOYAGE: VoyageEncoder,
+    EncoderIntegration.HUGGINGFACE_API: HFInferenceEncoder,
+}
 
 
 class MultiTaskModel(tf.keras.Model):
@@ -25,7 +33,6 @@ class MultiTaskModel(tf.keras.Model):
         config: ModelConfig object defining the architecture
         encoder: Optional encoder - TensorFlow Hub URL (https://tfhub.dev/...),
                  HuggingFace model name (e.g., 'bert-base-uncased'), or custom Keras layer
-        trainable_encoder: Whether encoder weights are trainable
         embedding_dim: If using embeddings, their dimension
         num_classes_per_task: Number of classes per task (default: 2 for binary)
         dropout: Dropout rate (overrides config if provided)
@@ -34,8 +41,7 @@ class MultiTaskModel(tf.keras.Model):
     Example:
         >>> # Using TensorFlow Hub
         >>> config = ModelConfig(task_structure=[[2]])
-        >>> model = MultiTaskModel(config=config, encoder='https://tfhub.dev/tensorflow/bert_en_uncased_L-12_H-768_A-12/4')
-        >>> 
+        >>> model = MultiTaskModel(config=config)
         >>> # Using HuggingFace
         >>> model = MultiTaskModel(config=config, encoder='bert-base-uncased')
     """
@@ -43,8 +49,6 @@ class MultiTaskModel(tf.keras.Model):
     def __init__(
         self,
         config: ModelConfig,
-        encoder: Optional[Union[str, tf.keras.layers.Layer]] = None,
-        trainable_encoder: bool = True,
         embedding_dim: Optional[int] = None,
         num_classes_per_task: Optional[List[int]] = None,
         dropout_rate: Optional[float] = None,
@@ -53,11 +57,18 @@ class MultiTaskModel(tf.keras.Model):
     ):
         # Use dropout from config if not explicitly provided
         dropout_rate = dropout_rate if dropout_rate is not None else 0.1
-        
+
+        # Consume encoder overrides before passing kwargs to parent (keras.Model rejects unknown kwargs)
+        _encoder_override = kwargs.pop('encoder', None)
+        _trainable_encoder_override = kwargs.pop('trainable_encoder', None)
+
         super().__init__(name=name or "MultiTaskModel", **kwargs)
-        
+
         self.config = config
-        
+        self.encoder_config = self.config.encoder_config
+        self._encoder_override = _encoder_override
+        self._trainable_encoder_override = _trainable_encoder_override
+
         # Number of classes per task: constructor overrides config default (config sets [2]*total_outputs when not provided).
         self.num_classes_per_task = (
             num_classes_per_task if num_classes_per_task is not None else self.config.num_classes_per_task
@@ -68,9 +79,15 @@ class MultiTaskModel(tf.keras.Model):
         
         # Validate configuration
         self._validate_config()
-        
-        # Build encoder
-        self._build_encoder(encoder, trainable_encoder, embedding_dim)
+
+        # Resolve embedding_dim: constructor override or from encoder_config (for pre-computed embeddings)
+        resolved_embedding_dim = embedding_dim
+        if resolved_embedding_dim is None and self.config.encoder_config is not None:
+            resolved_embedding_dim = getattr(self.config.encoder_config, "embedding_dim", None)
+        self.embedding_dim = resolved_embedding_dim
+
+        # Build encoder (pass resolved dim so pre-computed branch can use it)
+        self._build_encoder(resolved_embedding_dim)
         
         # Build architecture
         self._build_shared_layers()
@@ -86,57 +103,120 @@ class MultiTaskModel(tf.keras.Model):
     
     def _build_encoder(
         self,
-        encoder: Optional[Union[str, tf.keras.layers.Layer]] = None,
-        trainable_encoder: bool = True,
         embedding_dim: Optional[int] = None
     ):
-        """Build the encoder component.
+        """Build the encoder component. Encoder specifications should be instantiated in ModelConfig.
         
         Args:
-            encoder: Either a TensorFlow Hub URL, HuggingFace model name, a Keras layer, or None for embedding input
-            trainable_encoder: Whether encoder weights should be trainable
             embedding_dim: If using pre-computed embeddings, the dimension size
         """
-        if encoder is not None:
-            # Using a pre-trained encoder
-            if isinstance(encoder, str):
-                # Store identifier for save/load
-                self._encoder_identifier = encoder
-                
-                if encoder.startswith('https://tfhub.dev/'):
-                    # TensorFlow Hub model
-                    import tensorflow_hub as hub
-                    self.encoder = hub.KerasLayer(encoder, trainable=trainable_encoder, name='encoder')
-                    self.encoder_type = 'tfhub'
-                else:
-                    # HuggingFace model (e.g., 'bert-base-uncased', 'roberta-large')
-                    try:
-                        from transformers import TFAutoModel
-                    except ImportError:
-                        raise ImportError(
-                            "HuggingFace transformers library is required for this encoder. "
-                            "Install with: pip install transformers>=4.30.0 or pip install multitask[huggingface]"
-                        )
-                    self.encoder = TFAutoModel.from_pretrained(encoder, name='encoder')
-                    self.encoder.trainable = trainable_encoder
-                    self.encoder_type = 'huggingface'
+        # Constructor override (e.g. from load_model(encoder=...))
+        if self._encoder_override is not None:
+            if isinstance(self._encoder_override, str):
+                self.config.encoder_config = EncoderConfig(
+                    encoder=None,
+                    encoder_identifier=self._encoder_override,
+                    encoder_input_type=self.config.encoder_config.encoder_input_type,
+                    encoder_integration=self.config.encoder_config.encoder_integration,
+                    trainable_encoder=self._trainable_encoder_override if self._trainable_encoder_override is not None else self.config.encoder_config.trainable_encoder,
+                    api_key=self.config.encoder_config.api_key,
+                )
+                self.encoder_config = self.config.encoder_config
             else:
-                # Custom Keras layer
-                self.encoder = encoder
-                self.encoder.trainable = trainable_encoder
-                self.encoder_type = 'custom'
-                self._encoder_identifier = None
+                # Custom Keras layer override
+                self.config.encoder_config = EncoderConfig(
+                    encoder=self._encoder_override,
+                    encoder_identifier=None,
+                    encoder_input_type=self.config.encoder_config.encoder_input_type or EncoderInputType.RAW_STRING,
+                    encoder_integration=EncoderIntegration.KERAS,
+                    trainable_encoder=self._trainable_encoder_override if self._trainable_encoder_override is not None else self.config.encoder_config.trainable_encoder,
+                    api_key=self.config.encoder_config.api_key,
+                )
+                self.encoder_config = self.config.encoder_config
+
+        # Custom Keras encoder
+        if self.encoder_config.encoder is not None:
+            # Custom encoder already specified
+            self.encoder = self.encoder_config.encoder
+            self.encoder.trainable = self.encoder_config.trainable_encoder
+            self._encoder_identifier = None
+            self.encoder_input_type = self.encoder_config.encoder_input_type
+            self.encoder_integration = EncoderIntegration.KERAS
+            self.encoder_type = EncoderIntegration.KERAS.value
             self.uses_encoder = True
             self.embedding_dim = None
-        else:
-            # Using pre-computed embeddings
+
+        # Using pre-computed embeddings
+        elif self.encoder_config.encoder_identifier is None:
             if embedding_dim is None:
-                raise ValueError("Must specify embedding_dim when not using an encoder")
+                raise ValueError(
+                    "Must specify embedding_dim when not using an encoder. "
+                    "Set encoder_config.embedding_dim or pass MultiTaskModel(embedding_dim=...)."
+                )
             self.encoder = None
+            self.encoder_input_type = None
+            self.encoder_integration = None
             self.encoder_type = None
             self._encoder_identifier = None
             self.uses_encoder = False
             self.embedding_dim = embedding_dim
+
+        # Using other pre-trained encoder
+        elif self.encoder_config.encoder_identifier is not None:
+            encoder_integration = self.encoder_config.encoder_integration
+            encoder_identifier = self.encoder_config.encoder_identifier
+            self.encoder_integration = encoder_integration
+            self._encoder_identifier = encoder_identifier
+            trainable_encoder = self.encoder_config.trainable_encoder
+
+            if encoder_integration == EncoderIntegration.TFHUB:
+                # TensorFlow Hub model
+                import tensorflow_hub as hub
+                self.encoder = hub.KerasLayer(
+                    encoder_identifier, trainable=trainable_encoder, name='encoder'
+                )
+
+                if 'universal-sentence-encoder' in encoder_identifier.lower():
+                    self.encoder_input_type = EncoderInputType.RAW_STRING
+                else:
+                    self.encoder_input_type = EncoderInputType.TFHUB_TOKENS
+                self.encoder_type = EncoderIntegration.TFHUB.value
+
+            elif encoder_integration == EncoderIntegration.HUGGINGFACE:
+                # HuggingFace model (e.g., 'bert-base-uncased', 'roberta-large')
+                try:
+                    from transformers import TFAutoModel
+                except ImportError:
+                    raise ImportError(
+                        "HuggingFace transformers library is required for this encoder. "
+                        "Install with: pip install transformers>=4.30.0 or pip install multitask[huggingface]"
+                    )
+                # use_safetensors=False avoids a compatibility bug in transformers when
+                # loading TF models from .safetensors with safetensors>=0.5 (safe_open
+                # object is not iterable in load_pytorch_state_dict_in_tf2_model).
+                try:
+                    self.encoder = TFAutoModel.from_pretrained(
+                        encoder_identifier, name='encoder', use_safetensors=False
+                    )
+                except TypeError:
+                    # Older transformers may not accept use_safetensors
+                    self.encoder = TFAutoModel.from_pretrained(encoder_identifier, name='encoder')
+                self.encoder.trainable = trainable_encoder
+                self.encoder_input_type = EncoderInputType.HUGGINGFACE_TOKENS
+                self.encoder_type = EncoderIntegration.HUGGINGFACE.value
+
+            elif encoder_integration in API_ENCODER_CLASSES:
+                encoder_class = API_ENCODER_CLASSES.get(encoder_integration)
+                self.encoder = encoder_class(model_name=encoder_identifier, name='encoder')
+                self.encoder_input_type = EncoderInputType.RAW_STRING
+                self.encoder_type = encoder_integration.value
+
+            else:
+                raise ValueError(f"Unrecognized encoder integration: {encoder_integration}")
+
+            self.uses_encoder = True
+            self.embedding_dim = None
+
     
     def _encode_input(self, inputs: tf.Tensor, training: Optional[bool] = None) -> tf.Tensor:
         """Encode input through encoder or pass through embeddings.
@@ -336,44 +416,17 @@ class MultiTaskModel(tf.keras.Model):
 
         # Forward pass
         y_pred = self(x, training=False)
-        
-        # Compute loss
-        self.compute_loss(x, y, y_pred, sample_weight)
-        
-        task_names = self.task_names or [f'task_{i}' for i in range(self.config.total_outputs)]
 
+        # Compute loss (returns scalar)
+        loss = self.compute_loss(x, y, y_pred, sample_weight)
+
+        # Update metrics: only the main loss metric accepts a scalar; others expect
+        # (y, y_pred) in a format that breaks with dict outputs, so update loss only.
         for metric in self.metrics:
-            if metric.name == 'loss' or metric.name.endswith('_loss'):
-                continue  # already handled by compute_loss
+            if metric.name == "loss":
+                metric.update_state(loss)
+                break
 
-            # Find which task this metric belongs to by prefix matching
-            matched_task = next(
-                (t for t in task_names if metric.name.startswith(t)),
-                None
-            )
-
-            if matched_task is None or matched_task not in y or matched_task not in y_pred:
-                continue
-
-            y_true = y[matched_task]
-            y_hat = y_pred[matched_task]
-
-            # Mask out -1 labels (unlabeled samples)
-            mask = tf.not_equal(tf.reshape(y_true, [-1]), -1)
-            if tf.reduce_any(mask):
-                y_true_masked = tf.boolean_mask(y_true, mask)
-                y_hat_masked  = tf.boolean_mask(y_hat,  mask)
-                metric.update_state(y_true_masked, y_hat_masked)
-        # Update metrics
-        # self.compiled_metrics.update_state(y, y_pred, sample_weight)
-        # for metric in self.metrics:
-        #     if metric.name == 'loss':
-        #         continue
-        #     try:
-        #         metric.update_state(y, y_pred, sample_weight)
-        #     except TypeError:
-        #         metric.update_state(y, y_pred)
-        
         return {m.name: m.result() for m in self.metrics}
     
     def get_config(self) -> Dict[str, Any]:
@@ -387,7 +440,7 @@ class MultiTaskModel(tf.keras.Model):
                 'shared_layer_sizes': self.config.shared_layer_sizes,
                 'branch_layer_sizes': self.config.branch_layer_sizes,
                 'default_layer_sizes': self.config.default_layer_sizes,
-                'trainable_encoder': self.config.trainable_encoder,
+                'trainable_encoder': self.encoder_config.trainable_encoder,
                 'pooling_strategy': self.config.pooling_strategy,
             },
             'uses_encoder': self.uses_encoder,
@@ -633,7 +686,7 @@ class MultiTaskModel(tf.keras.Model):
                 
                 # ===== VALIDATE INPUTS =====
                 if self.uses_encoder:
-                    # Expecting dict (BERT, etc.) or tensor input
+                    # Expecting dict (BERT-style) or tensor input
                     if isinstance(inputs, dict):
                         # Dict input (typical for BERT)
                         for key, value in inputs.items():
@@ -654,11 +707,19 @@ class MultiTaskModel(tf.keras.Model):
                                 )
                     elif tf.is_tensor(inputs):
                         # Tensor input
-                        if len(inputs.shape) < 2:
-                            raise ValueError(
-                                f"Input tensor has shape {inputs.shape}. "
-                                f"Expected at least 2D (batch_size, sequence_length)."
-                            )
+                        if self.encoder_input_type == EncoderInputType.RAW_STRING:
+                            # Raw string encoders (e.g., API or USE) expect 1D [batch_size] string tensors
+                            if len(inputs.shape) != 1:
+                                raise ValueError(
+                                    f"Raw string encoder input has shape {inputs.shape}. "
+                                    f"Expected 1D tensor [batch_size] of dtype tf.string."
+                                )
+                        else:
+                            if len(inputs.shape) < 2:
+                                raise ValueError(
+                                    f"Input tensor has shape {inputs.shape}. "
+                                    f"Expected at least 2D (batch_size, sequence_length)."
+                                )
                     else:
                         raise ValueError(
                             f"Input must be dict or tensor. Got {type(inputs)}"
@@ -832,18 +893,11 @@ class MultiTaskModel(tf.keras.Model):
         # Create save directory
         os.makedirs(filepath, exist_ok=True)
         
-        # Save model weights
-        weights_path = os.path.join(filepath, 'weights')
-        if save_format == 'tf':
-            self.save_weights(weights_path + '.weights.h5')
-        else:
-            self.save_weights(weights_path + '.h5')
-        # if save_format == 'tf':
-        #     self.save_weights(weights_path)
-        # else:
-        #     self.save_weights(weights_path + '.h5')
+        # Save model weights (Keras 3 requires path to end in .weights.h5)
+        weights_path = os.path.join(filepath, 'weights.weights.h5')
+        self.save_weights(weights_path)
         
-        # Save ModelConfig
+        # Save ModelConfig (flat encoder keys for backward compat with load)
         config_dict = {
             'task_structure': self.config.task_structure,
             'task_types': self.config.task_types,
@@ -852,8 +906,8 @@ class MultiTaskModel(tf.keras.Model):
             'shared_layer_sizes': self.config.shared_layer_sizes,
             'branch_layer_sizes': self.config.branch_layer_sizes,
             'default_layer_sizes': self.config.default_layer_sizes,
-            'trainable_encoder': self.config.trainable_encoder,
             'pooling_strategy': self.config.pooling_strategy,
+            **self.config.encoder_config.to_dict_for_save(),
         }
         
         with open(os.path.join(filepath, 'config.json'), 'w') as f:
@@ -892,8 +946,8 @@ class MultiTaskModel(tf.keras.Model):
         
     def load_task_weights(self, weights_path: str):
         """
-        User-friendly weight loader. 
-        Verifies that weights match the hierarchical structure.
+        User-friendly weight loader.
+        Keras 3 load_weights() returns None (no status object).
         """
         if not os.path.exists(weights_path):
             for ext in ['.weights.h5', '.h5']:
@@ -901,11 +955,12 @@ class MultiTaskModel(tf.keras.Model):
                     weights_path = weights_path + ext
                     break
         try:
-            # status = self.load_weights(weights_path).expect_partial()
-            # status.assert_existing_objects_matched()
-            self.load_weights(weights_path)
+            result = self.load_weights(weights_path)
+            if result is not None:
+                status = result.expect_partial()
+                status.assert_existing_objects_matched()
             print(f"Successfully validated and loaded weights from {weights_path}")
-        # Catching the base OpError ensures that low-level C++ errors like 
+        # Catching the base OpError ensures that low-level C++ errors like
         # 'sstable' or 'tensor slice' issues are wrapped in our friendly message.
         except (tf.errors.OpError, tf.errors.DataLossError, AssertionError, ValueError) as e:
             raise ValueError(

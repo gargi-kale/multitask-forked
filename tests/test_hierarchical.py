@@ -4,7 +4,7 @@ import pytest
 
 try:
     import tensorflow as tf
-    from multitask.config import ModelConfig
+    from multitask.config import EncoderConfig, ModelConfig
     from multitask.models.hierarchical import MultiTaskModel
     HAS_TF = True
 except ImportError:
@@ -12,6 +12,7 @@ except ImportError:
     tf = None
     ModelConfig = None
     MultiTaskModel = None
+    EncoderConfig = None
 
 pytestmark = pytest.mark.skipif(not HAS_TF, reason="tensorflow not installed")
 
@@ -21,28 +22,30 @@ pytestmark = pytest.mark.skipif(not HAS_TF, reason="tensorflow not installed")
 
 @pytest.fixture
 def config_two_tasks():
-    """ModelConfig with 2 tasks: [[2]]."""
+    """ModelConfig with 2 tasks: [[2]], no encoder (pre-computed embeddings)."""
     return ModelConfig(
         task_structure=[[2]],
         shared_layer_sizes=[64, 32],
         default_layer_sizes=[32, 16],
+        encoder_config=EncoderConfig(),
     )
 
 
 @pytest.fixture
 def config_ten_tasks():
-    """ModelConfig with 10 tasks: [[3], [2, 5, 3]]."""
+    """ModelConfig with 10 tasks: [[3], [2, 5, 3]], no encoder."""
     return ModelConfig(
         task_structure=[[3], [2, 5, 3]],
         task_names=[f"task_{i}" for i in range(10)],
         shared_layer_sizes=[64, 32],
         default_layer_sizes=[32, 16],
+        encoder_config=EncoderConfig(),
     )
 
 
 @pytest.fixture
 def config_multiclass():
-    """ModelConfig with mixed binary and multiclass tasks."""
+    """ModelConfig with mixed binary and multiclass tasks, no encoder."""
     return ModelConfig(
         task_structure=[[2]],
         task_types=["binary", "multiclass"],
@@ -50,6 +53,7 @@ def config_multiclass():
         task_names=["binary_task", "multiclass_task"],
         shared_layer_sizes=[64],
         default_layer_sizes=[32],
+        encoder_config=EncoderConfig(),
     )
 
 
@@ -57,7 +61,6 @@ def _make_model(config, embedding_dim=64, num_classes_per_task=None, dropout_rat
     """Build MultiTaskModel with embeddings (no encoder) for testing."""
     return MultiTaskModel(
         config=config,
-        encoder=None,
         embedding_dim=embedding_dim,
         num_classes_per_task=num_classes_per_task,
         dropout_rate=dropout_rate,
@@ -122,7 +125,7 @@ class TestMultiTaskModelInit:
     def test_raises_when_no_encoder_and_no_embedding_dim(self, config_two_tasks):
         """ValueError when encoder is None and embedding_dim is None."""
         with pytest.raises(ValueError, match="Must specify embedding_dim"):
-            MultiTaskModel(config=config_two_tasks, encoder=None)
+            MultiTaskModel(config=config_two_tasks)
 
 
 # --- Forward pass and output structure ---

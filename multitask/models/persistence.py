@@ -6,8 +6,46 @@ from typing import Optional, Union, Dict
 
 import tensorflow as tf
 
-from ..config import ModelConfig
+from ..config import ModelConfig, EncoderConfig, EncoderInputType, EncoderIntegration
 from .hierarchical import MultiTaskModel
+
+
+def _get_build_dummy_input(model: MultiTaskModel, metadata: dict):
+    """Build a dummy input suitable for building the model (one forward pass) before loading weights.
+
+    Chooses input format based on encoder type so that model(dummy_input) succeeds:
+    - No encoder: pre-computed embeddings, shape (1, embedding_dim)
+    - HuggingFace: dict with input_ids, attention_mask, token_type_ids, each (1, 128)
+    - TF Hub Universal Sentence Encoder: string tensor
+    - TF Hub BERT-style: dict with input_word_ids, input_mask, input_type_ids
+    - Custom encoder: string tensor (common default; user may need to provide encoder if this fails)
+
+    Args:
+        model: MultiTaskModel instance (uses_encoder, encoder_type set).
+        metadata: Saved metadata dict (encoder_identifier, embedding_dim).
+
+    Returns:
+        Dummy input (Tensor or dict of Tensors) for model(dummy_input, training=False).
+    """
+    DUMMY_INPUT_BUILDERS = {
+        EncoderInputType.HUGGINGFACE_TOKENS: lambda: {
+            'input_ids': tf.zeros((1, 128), dtype=tf.int32),
+            'attention_mask': tf.ones((1, 128), dtype=tf.int32),
+            'token_type_ids': tf.zeros((1, 128), dtype=tf.int32),
+        },
+        EncoderInputType.TFHUB_TOKENS: lambda: {
+            'input_word_ids': tf.zeros((1, 128), dtype=tf.int32),
+            'input_mask': tf.ones((1, 128), dtype=tf.int32),
+            'input_type_ids': tf.zeros((1, 128), dtype=tf.int32),
+        },
+        EncoderInputType.RAW_STRING: lambda: tf.constant(["dummy text"], dtype=tf.string),
+        EncoderInputType.PRECOMPUTED: lambda: tf.zeros((1, metadata['embedding_dim']))
+    }
+
+    input_type = getattr(model, 'encoder_input_type', None)
+    if input_type is None:
+        input_type = EncoderInputType.PRECOMPUTED
+    return DUMMY_INPUT_BUILDERS.get(input_type)()
 
 
 def load_model(
@@ -55,8 +93,13 @@ def load_model(
     
     with open(config_path, 'r') as f:
         config_dict = json.load(f)
-    
-    model_config = ModelConfig(**config_dict)
+
+    # Support nested encoder_config or flat encoder_* keys (backward compat)
+    if "encoder_config" in config_dict:
+        encoder_config = EncoderConfig.from_dict(config_dict.pop("encoder_config"))
+        model_config = ModelConfig(encoder_config=encoder_config, **config_dict)
+    else:
+        model_config = ModelConfig(**config_dict)
     
     # Load metadata
     metadata_path = os.path.join(filepath, 'metadata.json')
@@ -89,37 +132,23 @@ def load_model(
     )
     
     # Build model by calling it once (required before loading weights)
-    # Create dummy input to infer shapes
-    if model.uses_encoder:
-        if model.encoder_type == 'huggingface':
-            dummy_input = {
-                'input_ids': tf.zeros((1, 128), dtype=tf.int32),
-                'attention_mask': tf.ones((1, 128), dtype=tf.int32),
-                'token_type_ids': tf.zeros((1, 128), dtype=tf.int32),
-            }
-        else:  # tfhub or custom
-            dummy_input = {
-                'input_word_ids': tf.zeros((1, 128), dtype=tf.int32),
-                'input_mask': tf.ones((1, 128), dtype=tf.int32),
-                'input_type_ids': tf.zeros((1, 128), dtype=tf.int32),
-            }
-    else:
-        dummy_input = tf.zeros((1, metadata['embedding_dim']))
-    
+    dummy_input = _get_build_dummy_input(model, metadata)
     _ = model(dummy_input, training=False)
     
-    # Load weights
-    weights_path = os.path.join(filepath, 'weights.weights.h5')
-    # check for .index file or the exact path or .h5
-    has_index = os.path.exists(weights_path + '.index')
-    has_direct = os.path.exists(weights_path)
-    has_h5 = os.path.exists(weights_path + '.h5')
-    
-    if has_index or has_direct or has_h5:
-        # use the new wrapper to ensure the file is valid for this model
-        model.load_task_weights(weights_path)
+    # Load weights (Keras 3 uses .weights.h5; support legacy paths for backward compat)
+    weights_path_h5 = os.path.join(filepath, 'weights.weights.h5')
+    weights_path_legacy = os.path.join(filepath, 'weights')
+    has_new = os.path.exists(weights_path_h5)
+    has_index = os.path.exists(weights_path_legacy + '.index')
+    has_direct = os.path.exists(weights_path_legacy)
+    has_h5 = os.path.exists(weights_path_legacy + '.h5')
+
+    if has_new:
+        model.load_task_weights(weights_path_h5)
+    elif has_index or has_direct or has_h5:
+        model.load_task_weights(weights_path_legacy)
     else:
-        raise ValueError(f"Weights file not found: {weights_path}")
+        raise ValueError(f"Weights file not found: {filepath} (expected weights.weights.h5 or legacy weights/weights.h5)")
     
     # Load thresholds if available
     thresholds = None
@@ -130,7 +159,8 @@ def load_model(
     
     print(f"Model loaded from {filepath}/")
     print(f"  - Encoder type: {model.encoder_type or 'embeddings'}")
-    print(f"  - Tasks: {', '.join(model.config.task_names)}")
+    task_names = model.config.task_names or [f'task_{i}' for i in range(model.config.total_outputs)]
+    print(f"  - Tasks: {', '.join(task_names)}")
     print(f"  - Trainable parameters: {model.count_params():,}")
     if thresholds:
         print(f"  - Thresholds: {list(thresholds.keys())}")
