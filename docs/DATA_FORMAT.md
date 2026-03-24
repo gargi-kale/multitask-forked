@@ -126,7 +126,7 @@ inputs = tokenizer(
 
 ### Format 2: Pre-computed Embedding Input
 
-When using pre-computed embeddings (`encoder=None`), inputs should be a **tensor** passed directly through the dataset.
+When using pre-computed embeddings (no `encoder_identifier` in `EncoderConfig`, only `embedding_dim`), inputs should be a **tensor** passed directly through the dataset.
 
 **How It Works:**
 
@@ -137,13 +137,13 @@ from multitask.config import ModelConfig
 
 config = ModelConfig(
     task_structure=[[2]],
-    task_names=['task_0', 'task_1']
+    task_names=['task_0', 'task_1'],
+    embedding_dim=768,  # Stored on encoder_config; required for pre-computed path
 )
 
 model = MultiTaskModel(
     config=config,
-    encoder=None,           # No encoder
-    embedding_dim=768       # Must specify embedding dimension
+    embedding_dim=768       # Must match; can also rely on config.embedding_dim
 )
 ```
 
@@ -434,13 +434,12 @@ def load_embeddings_and_labels():
 config = ModelConfig(
     task_structure=[[3]],
     task_types=['binary', 'multiclass', 'multilabel'],
-    num_classes_per_task=[1, 5, 5],
+    num_classes_per_task=[2, 5, 5],
     task_names=['sentiment', 'category', 'topics']
 )
 
 model = MultiTaskModel(
     config=config,
-    encoder=None,          # No encoder - using pre-computed embeddings
     embedding_dim=768      # Match your embedding dimension
 )
 
@@ -483,7 +482,6 @@ dataset = tf.data.Dataset.from_generator(
 config = ModelConfig(task_structure=[[1]], task_names=['is_spam'])
 model = MultiTaskModel(
     config=config,
-    encoder=None,
     embedding_dim=384  # Match sentence-transformers dimension
 )
 
@@ -684,7 +682,14 @@ labels_dict = {'multiclass': tf.constant([2, 0, -1], dtype=tf.int32)}
 ❌ **Wrong**: Using HuggingFace model without installing transformers
 ```python
 # This will fail if transformers not installed
-model = MultiTaskModel(config=config, encoder='bert-base-uncased')
+model = MultiTaskModel(
+    config=config, 
+    encoder_config=EncoderConfig(
+        encoder_identifier="bert-base-uncased",
+        encoder_input_type=EncoderInputType.HUGGINGFACE_TOKENS,
+        encoder_integration=EncoderIntegration.HUGGINGFACE
+    )
+)
 ```
 
 ✅ **Correct**: Install HuggingFace support first
@@ -702,25 +707,34 @@ Use `model.validate_dataset()` to catch format errors before training:
 
 ```python
 from multitask import MultiTaskModel
-from multitask.config import ModelConfig
+from multitask.config import ModelConfig, EncoderConfig, EncoderInputType, EncoderIntegration
 
 # Define model with TensorFlow Hub
 config = ModelConfig(
-    task_structure=[[2, 1]],
+    task_structure=[[3]],
     task_types=['binary', 'binary', 'multiclass'],
-    num_classes_per_task=[1, 1, 3],
-    task_names=['is_spam', 'is_urgent', 'category']
+    num_classes_per_task=[2, 2, 3],
+    task_names=['is_spam', 'is_urgent', 'category'],
+    encoder_config=EncoderConfig(
+        encoder_identifier="https://tfhub.dev/tensorflow/bert_en_uncased_L-12_H-768_A-12/4",
+        encoder_input_type=EncoderInputType.TFHUB_TOKENS,
+        encoder_integration=EncoderIntegration.TFHUB
+    )
 )
 
 model = MultiTaskModel(
     config=config,
-    encoder="https://tfhub.dev/tensorflow/bert_en_uncased_L-12_H-768_A-12/4"
 )
 
 # Or use HuggingFace
+# Requires: pip install multitask[huggingface]
+config.encoder_config = EncoderConfig(
+    encoder_identifier="bert-base-uncased",
+    encoder_input_type=EncoderInputType.HUGGINGFACE_TOKENS,
+    encoder_integration=EncoderIntegration.HUGGINGFACE,
+)
 model = MultiTaskModel(
-    config=config,
-    encoder="bert-base-uncased"  # Requires: pip install multitask[huggingface]
+    config=config
 )
 
 # Validate dataset format
@@ -772,7 +786,7 @@ Before training, verify:
   - TF Hub: `input_word_ids`, `input_mask`, `input_type_ids`
   - HuggingFace: `input_ids`, `attention_mask`, `token_type_ids`
 - [ ] **For embeddings**: Inputs are **tensor** with shape `[batch_size, embedding_dim]`
-  - Set `encoder=None` and `embedding_dim` in model
+  - Use `ModelConfig(embedding_dim=...)` / `EncoderConfig(embedding_dim=...)` with no `encoder_identifier`, and pass `embedding_dim` to `MultiTaskModel` if needed
   - Dataset yields pre-computed embeddings directly
 - [ ] Input dimensions match encoder/embedding requirements
 - [ ] Labels are in a **dictionary** with task names as keys

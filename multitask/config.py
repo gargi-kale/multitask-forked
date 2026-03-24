@@ -171,7 +171,7 @@ class EncoderConfig:
         
         # Default fallback for bare model names
         else:
-            self.encoder_integration = EncoderIntegration.HUGGINGFA
+            self.encoder_integration = EncoderIntegration.HUGGINGFACE
 
 
 @dataclass
