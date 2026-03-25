@@ -200,10 +200,30 @@ class Trainer:
                     loss_val = loss_val * sample_weights
                 
                 elif task_type == 'multiclass':
-                    num_classes = self.model.config.get_num_classes_per_task(real_idx)
-                    weight_map = tf.constant([class_weights[real_idx].get(i, 1.0) for i in range(num_classes)], dtype=tf.float32)
-                    sample_weights = tf.gather(weight_map, tf.clip_by_value(y_true_flat, 0, num_classes - 1))
-                    loss_val = loss_val * sample_weights
+                    y_task_true = tf.cast(tf.reshape(y_task_true, [-1]), tf.int32)
+                    
+                    loss_val = tf.keras.losses.sparse_categorical_crossentropy(
+                        y_task_true, y_task_pred, from_logits=False
+                    )
+                    # Create a tensor of all class weights for this task
+                    num_classes = self.model.config.get_num_classes_per_task(task_idx)
+                    weights_list = [tf.cast(class_weights[task_idx].get(i, 1.0), tf.float32) 
+                                   for i in range(num_classes)]
+                    weights_map = tf.constant(weights_list, dtype=tf.float32)
+                    
+                    # Mask -1 indices to 0, then gather weights
+                    safe_indices = tf.where(y_task_true < 0, 0, y_task_true)
+                    sample_class_weights = tf.gather(weights_map, safe_indices)
+                    loss_val = tf.reshape(loss_val, [-1]) * sample_class_weights
+                    
+                elif task_type == 'multilabel':
+                    loss_val = tf.keras.losses.binary_crossentropy(y_task_true, y_task_pred)
+                    y_task_true_int = tf.cast(y_task_true, tf.int32)
+                    
+                    w0 = tf.cast(class_weights[task_idx].get(0, 1.0), tf.float32)
+                    w1 = tf.cast(class_weights[task_idx].get(1, 1.0), tf.float32)
+                    sample_weights = tf.where(tf.equal(y_task_true_int, 0), w0, w1)
+                    loss_val = tf.reshape(loss_val * sample_weights, [-1])
                 else:
                     raise ValueError(f"Unknown task_type: {task_type}")
                 
@@ -719,7 +739,8 @@ class Trainer:
             # for joint optimization, implementing the core of multi-task learning
             self.model.compile(
                 optimizer=optimizer,
-                loss=loss_fn
+                loss=loss_fn,
+                jit_compile=False
             )
             
             # Setup callbacks
@@ -777,7 +798,7 @@ class Trainer:
             print(f"  Batch size: {self.config.batch_size}")
             print(f"  Learning rate: {self.config.learning_rate}")
             print(f"  Weight decay: {self.config.weight_decay_rate}")
-            print(f"  Dropout: {self.config.dropout_rate}")
+            print(f"  Dropout rate: {self.config.dropout_rate}")
             print(f"  Steps per epoch: {steps_per_epoch}\n")
             
             self.history = self.model.fit(
