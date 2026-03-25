@@ -503,7 +503,7 @@ class MultiTaskModel(tf.keras.Model):
             y_true = y[matched_task]
             y_hat = y_pred_filtered[matched_task]
 
-            mask = tf.not_equal(tf.reshape(y_true, [-1]), -1)
+            mask = tf.not_equal(tf.reshape(y_true, [-1]), self.config.mask_value)
             if tf.reduce_any(mask):
                 y_true_masked = tf.boolean_mask(y_true, mask)
                 y_hat_masked  = tf.boolean_mask(y_hat,  mask)
@@ -543,7 +543,7 @@ class MultiTaskModel(tf.keras.Model):
             y_true = y[matched_task]
             y_hat = y_pred_filtered[matched_task]
 
-            mask = tf.not_equal(tf.reshape(y_true, [-1]), -1)
+            mask = tf.not_equal(tf.reshape(y_true, [-1]), self.config.mask_value)
             if tf.reduce_any(mask):
                 y_true_masked = tf.boolean_mask(y_true, mask)
                 y_hat_masked  = tf.boolean_mask(y_hat,  mask)
@@ -1014,7 +1014,7 @@ class MultiTaskModel(tf.keras.Model):
                     
                     # Warn if all labels are masked
                     
-                    num_valid = tf.reduce_sum(tf.cast(labels != -1, tf.int32)).numpy()
+                    num_valid = tf.reduce_sum(tf.cast(labels != self.config.mask_value, tf.int32)).numpy()
                     if num_valid == 0:
                         if verbose:
                             print(f"Warning: All labels are masked (-1) for task '{task_name}'")
@@ -1091,6 +1091,7 @@ class MultiTaskModel(tf.keras.Model):
             'default_layer_sizes': self.config.default_layer_sizes,
             'pooling_strategy': self.config.pooling_strategy,
             'output_pools': self.config.output_pools,
+            'mask_value': self.config.mask_value,
             **self.config.encoder_config.to_dict_for_save(),
         }
         

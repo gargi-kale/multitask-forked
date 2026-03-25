@@ -61,16 +61,20 @@ class Trainer:
         self.strategy = strategy or tf.distribute.get_strategy()
         self.custom_loss_fn = loss_fn
         self.custom_optimizer = optimizer
+        self.mask_value = self.model.config.mask_value
         
         # Will be set during training
         self.history = None
         self.optimal_thresholds = None
     
-    def _validate_multilabel(self, y_true_dict, mask_value=-1):
+    def _validate_multilabel(self, y_true_dict, mask_value=None):
         """
         For multilabel tasks, either all labels are present per observation,
         or all labels are missing and then masked. Partial masking is not allowed.
         """
+        if mask_value is None:
+            mask_value = self.mask_value
+            
         for task_name, y_task_true in y_true_dict.items():
             real_idx = self.model.config.task_names.index(task_name)
             task_type = self.model.config.get_task_type(real_idx)
@@ -94,7 +98,7 @@ class Trainer:
         num_tasks: int,
         class_weights: List[Dict[int, float]],
         task_weights: List[float],
-        mask_value: int = -1
+        mask_value: Optional[float] = None
     ) -> Callable:
         """Build multi-task loss function with task-specific losses.
         
@@ -129,6 +133,9 @@ class Trainer:
         Returns:
             Loss function that takes (y_true_dict, y_pred_dict) and returns scalar loss
         """
+        if mask_value is None:
+            mask_value = self.mask_value
+            
         task_weights_tf = tf.cast(task_weights, tf.float32)
         
         def dict_weighted_masked_loss(y_true_dict: Any, y_pred_dict: Any):
@@ -181,7 +188,14 @@ class Trainer:
                 y_task_pred = y_pred_dict[task_name]
                 task_type = self.model.config.get_task_type(real_idx)
                 
-                if task_type == 'multiclass':
+                if task_type == 'regression':
+                    # MSE loss, no class weighting
+                    y_true_flat = tf.reshape(y_task_true, [-1])
+                    y_pred_flat = tf.reshape(y_task_pred, [-1])
+                    loss_val = tf.square(y_true_flat - y_pred_flat)
+                    mask = tf.cast(tf.not_equal(y_true_flat, mask_value), tf.float32)
+                
+                elif task_type == 'multiclass':
                     y_true_flat = tf.cast(tf.reshape(y_task_true, [-1]), tf.int32)
                     loss_val = tf.reshape(tf.keras.losses.sparse_categorical_crossentropy(
                         y_true_flat, y_task_pred, from_logits=False), [-1])
@@ -191,11 +205,13 @@ class Trainer:
                     y_true_flat = tf.reshape(y_task_true, [-1])
                     mask = tf.cast(tf.not_equal(y_true_flat, mask_value), tf.float32)
                 
-                # class weight
-                cw0 = tf.cast(class_weights[real_idx].get(0, 1.0), tf.float32)
-                cw1 = tf.cast(class_weights[real_idx].get(1, 1.0), tf.float32)
+                # Class weighting: skip for regression
+                if task_type == 'regression':
+                    pass  # no class weighting
                 
-                if task_type in ['binary', 'multilabel']:
+                elif task_type in ['binary', 'multilabel']:
+                    cw0 = tf.cast(class_weights[real_idx].get(0, 1.0), tf.float32)
+                    cw1 = tf.cast(class_weights[real_idx].get(1, 1.0), tf.float32)
                     sample_weights = tf.where(tf.equal(y_true_flat, 0), cw0, cw1)
                     loss_val = loss_val * sample_weights
                 
@@ -205,13 +221,11 @@ class Trainer:
                     loss_val = tf.keras.losses.sparse_categorical_crossentropy(
                         y_task_true, y_task_pred, from_logits=False
                     )
-                    # Create a tensor of all class weights for this task
                     num_classes = self.model.config.get_num_classes_per_task(task_idx)
                     weights_list = [tf.cast(class_weights[task_idx].get(i, 1.0), tf.float32) 
                                    for i in range(num_classes)]
                     weights_map = tf.constant(weights_list, dtype=tf.float32)
                     
-                    # Mask -1 indices to 0, then gather weights
                     safe_indices = tf.where(y_task_true < 0, 0, y_task_true)
                     sample_class_weights = tf.gather(weights_map, safe_indices)
                     loss_val = tf.reshape(loss_val, [-1]) * sample_class_weights
@@ -466,10 +480,12 @@ class Trainer:
                 f1_scores[name] = 0.0
                 continue
             
-            if task_type == 'multiclass':
-                # Multiclass doesn't use thresholds - use argmax
+            if task_type in ('multiclass', 'regression'):
+                # Multiclass uses argmax, regression has no threshold
                 thresholds[name] = None
                 f1_scores[name] = 0.0
+                continue
+            
             else:
                 # Binary or multilabel: find optimal threshold
                 # For pooled binary labels with 'max' strategy, ground truth
@@ -522,8 +538,8 @@ class Trainer:
             
             for task_name in task_names:
                 labels = labels_dict[task_name]
-                # Count non-masked samples (not equal to -1)
-                non_masked = tf.reduce_sum(tf.cast(tf.not_equal(labels, -1), tf.int32)).numpy()
+                # Count non-masked samples (not equal to self.mask_value)
+                non_masked = tf.reduce_sum(tf.cast(tf.not_equal(labels, self.mask_value), tf.int32)).numpy()
                 task_sample_counts[task_name] += non_masked
             
             if total_samples >= num_samples_to_check:
@@ -567,14 +583,15 @@ class Trainer:
             batch_size = tf.shape(list(labels_dict.values())[0])[0].numpy()
             total_samples += batch_size
             
-            for task_idx, task_name in enumerate(sorted(task_names)):
+            for task_name in sorted(task_names):
                 labels = labels_dict[task_name].numpy()
-                task_type = self.model.config.get_task_type(task_idx)
+                real_idx = list(self.model.task_names).index(task_name)
+                task_type = self.model.config.get_task_type(real_idx)
                 
                 # Flatten and filter out masked values
                 if len(labels.shape) > 1:
                     labels = labels.flatten()
-                valid_labels = labels[labels != -1]
+                valid_labels = labels[labels != self.mask_value]
                 
                 if len(valid_labels) > 0:
                     task_labels[task_name].extend(valid_labels.tolist())
@@ -584,10 +601,16 @@ class Trainer:
         
         # Compute class weights for each task
         class_weights_list = []
-        for task_idx, task_name in enumerate(sorted(task_names)):
+        for task_name in sorted(task_names):
             labels = np.array(task_labels[task_name])
-            task_type = self.model.config.get_task_type(task_idx)
-            num_classes = self.model.config.get_num_classes_per_task(task_idx)
+            real_idx = list(self.model.task_names).index(task_name)
+            task_type = self.model.config.get_task_type(real_idx)
+            num_classes = self.model.config.get_num_classes_per_task(real_idx)
+            
+            # Regression tasks have no classes
+            if task_type == 'regression':
+                class_weights_list.append({0: 1.0})
+                continue
             
             if len(labels) == 0:
                 # No valid labels - use uniform weights
@@ -846,9 +869,10 @@ class Trainer:
                 self.optimal_thresholds = {}
                 task_names = self.model.task_names or [f'task_{i}' for i in range(num_tasks)]
                 
-                for task_idx, task_name in enumerate(sorted(task_names)):
-                    task_type = self.model.config.get_task_type(task_idx)
-                    if task_type == 'multiclass':
+                for task_name in sorted(task_names):
+                    real_idx = list(self.model.task_names).index(task_name)
+                    task_type = self.model.config.get_task_type(real_idx)
+                    if task_type in ('multiclass', 'regression'):
                         self.optimal_thresholds[task_name] = None
                     else:
                         # Binary or multilabel: use 0.5 as default

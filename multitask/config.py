@@ -326,6 +326,10 @@ class ModelConfig:
     # They are NOT included in the training loss.
     output_pools: Optional[Dict[str, Dict[str, Any]]] = None
     
+    # mask value for missing values. Default -1
+    # change if -1 is a valid regression target in the data
+    mask_value: float = -1.0
+    
     def __post_init__(self):
         """Validate configuration after initialization."""
         # Validate task structure
