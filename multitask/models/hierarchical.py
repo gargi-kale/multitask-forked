@@ -96,8 +96,8 @@ class MultiTaskModel(tf.keras.Model):
     
     def _validate_config(self):
         """Validate model configuration."""
-        if any(x < 2 for x in self.num_classes_per_task):
-            raise ValueError("num_classes_per_task must be at least 2")
+        if any(x < 1 for x in self.num_classes_per_task):
+            raise ValueError("num_classes_per_task must be at least 1")
         if not 0 <= self.dropout_rate < 1:
             raise ValueError("dropout_rate must be in range [0, 1)")
     
@@ -331,6 +331,13 @@ class MultiTaskModel(tf.keras.Model):
                 layer = tf.keras.layers.Dense(
                     output_dim,
                     activation='sigmoid',
+                    name=f'{task_name}_output'
+                )
+            elif task_type == 'regression':
+                # Regression: 1 output with linear activation
+                layer = tf.keras.layers.Dense(
+                    output_dim,
+                    activation='linear',
                     name=f'{task_name}_output'
                 )
             else:
@@ -996,7 +1003,17 @@ class MultiTaskModel(tf.keras.Model):
                                 f"Expected 0, 1, or -1 (mask)"
                             )
                     
+                    elif task_type == 'regression':
+                        # Regression: [batch_size] or [batch_size, 1], any float value
+                        # Only validate shape, not value range (any float is valid)
+                        if len(labels.shape) == 2 and labels.shape[1] != 1:
+                            raise ValueError(
+                                f"Regression task '{task_name}' has shape {labels.shape}. "
+                                f"Expected [batch_size] or [batch_size, 1]"
+                            )
+                    
                     # Warn if all labels are masked
+                    
                     num_valid = tf.reduce_sum(tf.cast(labels != -1, tf.int32)).numpy()
                     if num_valid == 0:
                         if verbose:

@@ -210,6 +210,10 @@ class TrainingConfig:
     lr_schedule_type: str = 'polynomial_decay'  # 'polynomial_decay', 'exponential_decay', 'cosine_decay', 'constant'
     use_warmup: bool = True
     
+    # mask value for missing values. Default -1
+    # change if -1 is a valid regression target in the data
+    mask_value: float = -1.0
+    
     def __post_init__(self):
         """Validate configuration after initialization."""
         if self.epochs < 1:
@@ -392,9 +396,15 @@ class ModelConfig:
         if self.pooling_strategy not in valid_pooling:
             raise ValueError(f"pooling_strategy must be one of {valid_pooling}")
         
-        # Default num_classes_per_task to binary (2) per task when not provided
+        # Default num_classes_per_task based on task type.
+        # Regression tasks output 1 value; all classification types default to 2.
         if self.num_classes_per_task is None:
-            self.num_classes_per_task = [2] * self.total_outputs
+            if self.task_types is not None:
+                self.num_classes_per_task = [
+                    1 if t == 'regression' else 2 for t in self.task_types
+                ]
+            else:
+                self.num_classes_per_task = [2] * self.total_outputs
         
         # Validate task_types if provided
         if self.task_types is not None:
@@ -403,7 +413,7 @@ class ModelConfig:
                     f"task_types length ({len(self.task_types)}) must equal "
                     f"total_outputs ({self.total_outputs})"
                 )
-            valid_types = {'binary', 'multiclass', 'multilabel'}
+            valid_types = {'binary', 'multiclass', 'multilabel', 'regression'}
             for task_type in self.task_types:
                 if task_type not in valid_types:
                     raise ValueError(
@@ -416,8 +426,8 @@ class ModelConfig:
                 f"num_classes_per_task length ({len(self.num_classes_per_task)}) must equal "
                 f"total_outputs ({self.total_outputs})"
             )
-        if not all(n >= 2 for n in self.num_classes_per_task):
-            raise ValueError("All num_classes_per_task values must be >= 2")
+        if not all(n >= 1 for n in self.num_classes_per_task):
+            raise ValueError("All num_classes_per_task values must be >= 1")
         if self.task_types is not None:
             for task_idx, (task_type, num_classes) in enumerate(zip(self.task_types, self.num_classes_per_task)):
                 if task_type == 'binary' and num_classes != 2:
@@ -429,6 +439,11 @@ class ModelConfig:
                     raise ValueError(
                         f"Task {task_idx} is type 'multiclass' but num_classes_per_task[{task_idx}]={num_classes}. "
                         f"Multiclass tasks should have num_classes >= 3."
+                    )
+                elif task_type == 'regression' and num_classes not in (1, 2):
+                    raise ValueError(
+                        f"Task {task_idx} is type 'regression' but num_classes_per_task[{task_idx}]={num_classes}. "
+                        f"Regression tasks should have num_classes=1 (single output) or 2 (default)."
                     )
         
         # Validate task_names if provided
@@ -523,6 +538,15 @@ class ModelConfig:
                         f"Pool '{pool_name}' references task '{task_name}' which is not "
                         f"in task_names. Available tasks: {sorted(task_name_set)}"
                     )
+                
+                # Regression tasks cannot be pooled
+                if self.task_types is not None:
+                    task_idx = list(self.task_names).index(task_name)
+                    if self.task_types[task_idx] == 'regression':
+                        raise ValueError(
+                            f"Pool '{pool_name}' references regression task '{task_name}'. "
+                            f"Regression tasks cannot be included in output pools."
+                        )
                 
                 if task_name in assigned_tasks:
                     raise ValueError(
@@ -717,6 +741,8 @@ class ModelConfig:
         num_classes = self.get_num_classes_per_task(task_idx)
         
         if task_type == 'binary':
+            return 1
+        elif task_type == 'regression':
             return 1
         elif task_type == 'multiclass' or task_type == 'multilabel':
             return num_classes
