@@ -11,8 +11,10 @@ import tensorflow as tf
 from typing import Optional, Dict, List, Tuple, Any, Callable, Union
 from sklearn.metrics import (
     roc_curve, f1_score, precision_score, recall_score, 
-    roc_auc_score, average_precision_score, accuracy_score
+    roc_auc_score, average_precision_score, accuracy_score,
+    mean_squared_error, mean_absolute_error, r2_score
 )
+from scipy.stats import pearsonr
 from multitask.config import TrainingConfig
 from multitask.models.hierarchical import MultiTaskModel
 from multitask.utils.compat import WarmUpWrapper
@@ -221,8 +223,8 @@ class Trainer:
                     loss_val = tf.keras.losses.sparse_categorical_crossentropy(
                         y_task_true, y_task_pred, from_logits=False
                     )
-                    num_classes = self.model.config.get_num_classes_per_task(task_idx)
-                    weights_list = [tf.cast(class_weights[task_idx].get(i, 1.0), tf.float32) 
+                    num_classes = self.model.config.get_num_classes_per_task(real_idx)
+                    weights_list = [tf.cast(class_weights[real_idx].get(i, 1.0), tf.float32) 
                                    for i in range(num_classes)]
                     weights_map = tf.constant(weights_list, dtype=tf.float32)
                     
@@ -234,8 +236,8 @@ class Trainer:
                     loss_val = tf.keras.losses.binary_crossentropy(y_task_true, y_task_pred)
                     y_task_true_int = tf.cast(y_task_true, tf.int32)
                     
-                    w0 = tf.cast(class_weights[task_idx].get(0, 1.0), tf.float32)
-                    w1 = tf.cast(class_weights[task_idx].get(1, 1.0), tf.float32)
+                    w0 = tf.cast(class_weights[real_idx].get(0, 1.0), tf.float32)
+                    w1 = tf.cast(class_weights[real_idx].get(1, 1.0), tf.float32)
                     sample_weights = tf.where(tf.equal(y_task_true_int, 0), w0, w1)
                     loss_val = tf.reshape(loss_val * sample_weights, [-1])
                 else:
@@ -352,7 +354,7 @@ class Trainer:
     def _derive_pooled_labels(
         self,
         y_true_dict: Dict[str, np.ndarray],
-        mask_value: int = -1
+        mask_value: Optional[float] = None
     ) -> Dict[str, np.ndarray]:
         """Derive ground-truth labels for pooled outputs from task labels.
         
@@ -428,7 +430,7 @@ class Trainer:
         self,
         y_true_dict: Dict[str, np.ndarray],
         y_pred_dict: Dict[str, np.ndarray],
-        mask_value: int = -1
+        mask_value: Optional[float] = None
     ) -> Tuple[Dict[str, float], Dict[str, float]]:
         """Find optimal classification thresholds using validation data.
         
@@ -894,7 +896,7 @@ class Trainer:
         dataset: tf.data.Dataset,
         thresholds: Optional[Dict[str, float]] = None,
         metrics: Optional[List[str]] = None,
-        mask_value: int = -1
+        mask_value: Optional[float] = None
     ) -> Dict[str, Any]:
         """Evaluate the model on a dataset.
         
@@ -938,6 +940,9 @@ class Trainer:
             >>> # Probability-based metrics only
             >>> results = trainer.evaluate(test_dataset, metrics=['auc', 'average_precision'])
         """
+        if mask_value is None:
+            mask_value = self.mask_value
+        
         # Get predictions (includes both task and pool outputs)
         print("Generating predictions...")
         y_pred_dict = self.model.predict(dataset, verbose=0)
@@ -972,9 +977,9 @@ class Trainer:
                 metrics = ['auc', 'average_precision']
         
         # Validate metrics
-        binary_metrics = {'accuracy', 'precision', 'recall', 'f1'}
-        prob_metrics = {'auc', 'average_precision'}
-        valid_metrics = binary_metrics | prob_metrics
+        classification_metrics = {'accuracy', 'precision', 'recall', 'f1', 'auc', 'average_precision'}
+        regression_metrics = {'mse', 'mae', 'r2', 'pearson_r'}
+        valid_metrics = classification_metrics | regression_metrics
         
         for metric in metrics:
             if metric not in valid_metrics:
@@ -992,16 +997,23 @@ class Trainer:
                     task_idx = list(self.model.task_names).index(name) if self.model.task_names else all_output_names.index(name)
                     task_type = self.model.config.get_task_type(task_idx)
                 
-                if task_type == 'multiclass':
+                if task_type == 'regression':
+                    # Regression: no binarization, store raw predictions
+                    y_pred_binary_dict[name] = y_pred_dict[name].ravel()
+                elif task_type == 'multiclass':
                     y_pred_binary_dict[name] = np.argmax(y_pred_dict[name], axis=1)
                 else:
                     threshold = use_thresholds.get(name, 0.5)
                     y_pred_binary_dict[name] = (y_pred_dict[name][:, 0] > threshold).astype(int)
         
+        # ------------------------------------------------------------------
         # Compute metrics per output (tasks and pools)
+        # ------------------------------------------------------------------
         task_metrics = {}
         pool_metrics = {}
-        overall_metrics = {metric: [] for metric in metrics}
+        # Track classification and regression overall metrics separately
+        overall_clf_metrics = {m: [] for m in metrics if m in classification_metrics}
+        overall_reg_metrics = {m: [] for m in ['mse', 'mae', 'r2', 'pearson_r']}
         
         for name in all_output_names:
             is_pool = self.model.config.is_pool(name)
@@ -1025,7 +1037,10 @@ class Trainer:
             y_out_pred_probs_valid = y_out_pred_probs[valid_mask]
             
             if len(y_out_true_valid) == 0:
-                results_for_output = {metric: None for metric in metrics}
+                if task_type == 'regression':
+                    results_for_output = {m: None for m in ['mse', 'mae', 'r2', 'pearson_r']}
+                else:
+                    results_for_output = {m: None for m in metrics if m in classification_metrics}
                 if is_pool:
                     pool_metrics[name] = results_for_output
                 else:
@@ -1033,6 +1048,45 @@ class Trainer:
                 continue
             
             output_results = {}
+            
+            # ==============================================================
+            # REGRESSION METRICS
+            # ==============================================================
+            if task_type == 'regression':
+                y_true_flat = y_out_true_valid.ravel()
+                y_pred_flat = y_out_pred_probs_valid.ravel()
+                
+                mse = float(mean_squared_error(y_true_flat, y_pred_flat))
+                mae = float(mean_absolute_error(y_true_flat, y_pred_flat))
+                output_results['mse'] = mse
+                output_results['mae'] = mae
+                
+                # R² and Pearson require at least 2 samples
+                if len(y_true_flat) >= 2:
+                    r2 = float(r2_score(y_true_flat, y_pred_flat))
+                    r, _ = pearsonr(y_true_flat, y_pred_flat)
+                    output_results['r2'] = r2
+                    output_results['pearson_r'] = float(r)
+                else:
+                    output_results['r2'] = None
+                    output_results['pearson_r'] = None
+                
+                if not is_pool:
+                    overall_reg_metrics['mse'].append(mse)
+                    overall_reg_metrics['mae'].append(mae)
+                    if output_results['r2'] is not None:
+                        overall_reg_metrics['r2'].append(output_results['r2'])
+                        overall_reg_metrics['pearson_r'].append(output_results['pearson_r'])
+                
+                if is_pool:
+                    pool_metrics[name] = output_results
+                else:
+                    task_metrics[name] = output_results
+                continue
+            
+            # ==============================================================
+            # CLASSIFICATION METRICS (binary, multiclass, multilabel)
+            # ==============================================================
             
             # For pooled binary labels with 'mean' strategy, ground truth
             # may be fractional — binarize for classification metrics.
@@ -1045,32 +1099,32 @@ class Trainer:
                 y_out_true_binary = y_out_true_valid[:, 0]
             
             # Compute binary metrics if thresholds available
-            if use_thresholds is not None and task_type != 'multiclass':
+            if use_thresholds is not None and task_type not in ('multiclass', 'regression'):
                 y_out_pred_binary = y_pred_binary_dict[name][valid_mask]
                 
                 if 'accuracy' in metrics:
                     acc = accuracy_score(y_out_true_binary, y_out_pred_binary)
                     output_results['accuracy'] = float(acc)
                     if not is_pool:
-                        overall_metrics['accuracy'].append(acc)
+                        overall_clf_metrics['accuracy'].append(acc)
                 
                 if 'precision' in metrics:
                     prec = precision_score(y_out_true_binary, y_out_pred_binary, zero_division=0)
                     output_results['precision'] = float(prec)
                     if not is_pool:
-                        overall_metrics['precision'].append(prec)
+                        overall_clf_metrics['precision'].append(prec)
                 
                 if 'recall' in metrics:
                     rec = recall_score(y_out_true_binary, y_out_pred_binary, zero_division=0)
                     output_results['recall'] = float(rec)
                     if not is_pool:
-                        overall_metrics['recall'].append(rec)
+                        overall_clf_metrics['recall'].append(rec)
                 
                 if 'f1' in metrics:
                     f1 = f1_score(y_out_true_binary, y_out_pred_binary, zero_division=0)
                     output_results['f1'] = float(f1)
                     if not is_pool:
-                        overall_metrics['f1'].append(f1)
+                        overall_clf_metrics['f1'].append(f1)
             elif task_type == 'multiclass' and use_thresholds is not None:
                 y_out_pred_classes = y_pred_binary_dict[name][valid_mask]
                 y_out_true_classes = y_out_true_valid[:, 0] if y_out_true_valid.ndim > 1 else y_out_true_valid
@@ -1079,13 +1133,13 @@ class Trainer:
                     acc = accuracy_score(y_out_true_classes, y_out_pred_classes)
                     output_results['accuracy'] = float(acc)
                     if not is_pool:
-                        overall_metrics['accuracy'].append(acc)
+                        overall_clf_metrics['accuracy'].append(acc)
                 
                 if 'f1' in metrics:
                     f1 = f1_score(y_out_true_classes, y_out_pred_classes, average='weighted', zero_division=0)
                     output_results['f1'] = float(f1)
                     if not is_pool:
-                        overall_metrics['f1'].append(f1)
+                        overall_clf_metrics['f1'].append(f1)
             
             # Compute probability-based metrics
             if 'auc' in metrics and task_type in ['binary', 'multilabel']:
@@ -1094,7 +1148,7 @@ class Trainer:
                     auc = roc_auc_score(y_out_true_binary, y_probs_for_auc)
                     output_results['auc'] = float(auc)
                     if not is_pool:
-                        overall_metrics['auc'].append(auc)
+                        overall_clf_metrics['auc'].append(auc)
                 except ValueError:
                     output_results['auc'] = None
             
@@ -1104,7 +1158,7 @@ class Trainer:
                     ap = average_precision_score(y_out_true_binary, y_probs_for_ap)
                     output_results['average_precision'] = float(ap)
                     if not is_pool:
-                        overall_metrics['average_precision'].append(ap)
+                        overall_clf_metrics['average_precision'].append(ap)
                 except ValueError:
                     output_results['average_precision'] = None
             
@@ -1114,13 +1168,19 @@ class Trainer:
             else:
                 task_metrics[name] = output_results
         
-        # Average overall metrics (tasks only — pools are reported separately)
-        for metric in overall_metrics:
-            valid_scores = [s for s in overall_metrics[metric] if s is not None]
+        # Aggregate overall metrics: split by task type
+        overall_metrics = {}
+        
+        # Classification averages
+        for metric, scores in overall_clf_metrics.items():
+            valid_scores = [s for s in scores if s is not None]
+            overall_metrics[metric] = float(np.mean(valid_scores)) if valid_scores else None
+        
+        # Regression averages
+        for metric, scores in overall_reg_metrics.items():
+            valid_scores = [s for s in scores if s is not None]
             if valid_scores:
                 overall_metrics[metric] = float(np.mean(valid_scores))
-            else:
-                overall_metrics[metric] = None
         
         # Build results dictionary
         results = {
@@ -1140,11 +1200,28 @@ class Trainer:
         print("\n" + "=" * 60)
         print("Evaluation Results")
         print("=" * 60)
-        for metric, value in overall_metrics.items():
-            if value is not None:
-                print(f"{metric.upper():20s}: {value:.4f}")
-            else:
-                print(f"{metric.upper():20s}: N/A")
+        
+        # Classification metrics
+        clf_keys = [k for k in overall_metrics if k in classification_metrics]
+        if clf_keys:
+            print("Classification (averaged over classification tasks):")
+            for metric in clf_keys:
+                value = overall_metrics[metric]
+                if value is not None:
+                    print(f"  {metric.upper():20s}: {value:.4f}")
+                else:
+                    print(f"  {metric.upper():20s}: N/A")
+        
+        # Regression metrics
+        reg_keys = [k for k in overall_metrics if k in regression_metrics]
+        if reg_keys:
+            print("Regression (averaged over regression tasks):")
+            for metric in reg_keys:
+                value = overall_metrics[metric]
+                if value is not None:
+                    print(f"  {metric.upper():20s}: {value:.4f}")
+                else:
+                    print(f"  {metric.upper():20s}: N/A")
         
         if pool_metrics:
             print("-" * 60)
