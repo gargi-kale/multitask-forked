@@ -338,6 +338,53 @@ class MultiTaskModel(tf.keras.Model):
             
             self.output_layers[task_name] = layer
     
+    def _compute_pooled_outputs(
+        self,
+        output_dict: Dict[str, tf.Tensor]
+    ) -> Dict[str, tf.Tensor]:
+        """Compute pooled outputs from individual task outputs.
+        
+        For each pool defined in config.output_pools, gathers the constituent
+        task outputs, stacks them, and applies the configured pooling operation
+        (max, mean, or min) along the task axis.
+        
+        This is called at the end of the forward pass. Pooled outputs are
+        inference-only derived values — they are not part of the training loss.
+        
+        Args:
+            output_dict: Dictionary of task_name -> output tensor from the
+                         architectural output layers.
+                         
+        Returns:
+            Dictionary of pool_name -> pooled tensor. Empty dict if no pools
+            are configured. Each pooled tensor has the same shape as the
+            constituent task outputs (typically [batch_size, 1] for binary).
+        """
+        if not self.config.has_pools:
+            return {}
+        
+        pooled = {}
+        for pool_name in self.config.pool_names:
+            pool_cfg = self.config.get_pool_config(pool_name)
+            
+            # Gather task tensors and stack along a new axis.
+            # Each tensor is typically [batch_size, output_dim].
+            # After stacking: [batch_size, num_constituent_tasks, output_dim]
+            constituent_tensors = [output_dict[t] for t in pool_cfg['tasks']]
+            stacked = tf.stack(constituent_tensors, axis=1)
+            
+            # Apply the pooling operation along the task axis.
+            strategy = pool_cfg['strategy']
+            if strategy == 'max':
+                pooled[pool_name] = tf.reduce_max(stacked, axis=1)
+            elif strategy == 'mean':
+                pooled[pool_name] = tf.reduce_mean(stacked, axis=1)
+            elif strategy == 'min':
+                pooled[pool_name] = tf.reduce_min(stacked, axis=1)
+            else:
+                raise ValueError(f"Unknown pooling strategy: {strategy}")
+        
+        return pooled
     
     def call(
         self, 
@@ -404,29 +451,97 @@ class MultiTaskModel(tf.keras.Model):
             output = self.output_layers[task_name](branch_rep, training=training)
             output_dict[task_name] = output
         
+        # Compute pooled outputs (inference-only derived predictions).
+        # These are appended to the same dict so downstream code (predict,
+        # evaluate) gets both individual and pooled outputs in one place.
+        pooled_outputs = self._compute_pooled_outputs(output_dict)
+        output_dict.update(pooled_outputs)
+        
         return output_dict
-
-    def test_step(self, data):
-        """Custom evaluation step to handle dictionary outputs correctly."""
+    
+    def train_step(self, data):
+        """Custom training step to filter out pooled outputs before loss computation."""
         if len(data) == 3:
             x, y, sample_weight = data
         else:
             x, y = data
             sample_weight = None
 
-        # Forward pass
-        y_pred = self(x, training=False)
+        task_names = self.task_names or [f'task_{i}' for i in range(self.config.total_outputs)]
 
-        # Compute loss (returns scalar)
-        loss = self.compute_loss(x, y, y_pred, sample_weight)
+        with tf.GradientTape() as tape:
+            # Forward pass (Outputs all keys, including pools)
+            y_pred = self(x, training=True)
+            
+            # --- KERAS 3 STRICT STRUCTURE FIX ---
+            # Filter out derived pools so y_pred matches the exact keys of y_true
+            y_pred_filtered = {k: y_pred[k] for k in task_names}
+            
+            # Compute loss using ONLY the matched architectural tasks
+            loss = self.compute_loss(x, y, y_pred_filtered, sample_weight)
 
-        # Update metrics: only the main loss metric accepts a scalar; others expect
-        # (y, y_pred) in a format that breaks with dict outputs, so update loss only.
+        # Compute gradients and update weights
+        gradients = tape.gradient(loss, self.trainable_variables)
+        self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
+
+        # Update metrics manually to support masked labels (-1)
         for metric in self.metrics:
-            if metric.name == "loss":
-                metric.update_state(loss)
-                break
+            if metric.name == 'loss' or metric.name.endswith('_loss'):
+                continue
 
+            matched_task = next((t for t in task_names if metric.name.startswith(t)), None)
+            if matched_task is None or matched_task not in y or matched_task not in y_pred_filtered:
+                continue
+
+            y_true = y[matched_task]
+            y_hat = y_pred_filtered[matched_task]
+
+            mask = tf.not_equal(tf.reshape(y_true, [-1]), -1)
+            if tf.reduce_any(mask):
+                y_true_masked = tf.boolean_mask(y_true, mask)
+                y_hat_masked  = tf.boolean_mask(y_hat,  mask)
+                metric.update_state(y_true_masked, y_hat_masked)
+
+        return {m.name: m.result() for m in self.metrics}
+
+    def test_step(self, data):
+        """Custom evaluation step to filter out pooled outputs before loss computation."""
+        if len(data) == 3:
+            x, y, sample_weight = data
+        else:
+            x, y = data
+            sample_weight = None
+
+        task_names = self.task_names or [f'task_{i}' for i in range(self.config.total_outputs)]
+
+        # Forward pass (Outputs all keys, including pools)
+        y_pred = self(x, training=False)
+        
+        # --- KERAS 3 STRICT STRUCTURE FIX ---
+        # Filter out derived pools so y_pred matches the exact keys of y_true
+        y_pred_filtered = {k: y_pred[k] for k in task_names}
+        
+        # Compute loss using ONLY the matched architectural tasks
+        self.compute_loss(x, y, y_pred_filtered, sample_weight)
+
+        # Update metrics manually to support masked labels (-1)
+        for metric in self.metrics:
+            if metric.name == 'loss' or metric.name.endswith('_loss'):
+                continue
+
+            matched_task = next((t for t in task_names if metric.name.startswith(t)), None)
+            if matched_task is None or matched_task not in y or matched_task not in y_pred_filtered:
+                continue
+
+            y_true = y[matched_task]
+            y_hat = y_pred_filtered[matched_task]
+
+            mask = tf.not_equal(tf.reshape(y_true, [-1]), -1)
+            if tf.reduce_any(mask):
+                y_true_masked = tf.boolean_mask(y_true, mask)
+                y_hat_masked  = tf.boolean_mask(y_hat,  mask)
+                metric.update_state(y_true_masked, y_hat_masked)
+        
         return {m.name: m.result() for m in self.metrics}
     
     def get_config(self) -> Dict[str, Any]:
@@ -442,6 +557,7 @@ class MultiTaskModel(tf.keras.Model):
                 'default_layer_sizes': self.config.default_layer_sizes,
                 'trainable_encoder': self.encoder_config.trainable_encoder,
                 'pooling_strategy': self.config.pooling_strategy,
+                'output_pools': self.config.output_pools,
             },
             'uses_encoder': self.uses_encoder,
             'embedding_dim': self.embedding_dim,
@@ -471,6 +587,17 @@ class MultiTaskModel(tf.keras.Model):
             lines.append(f"{indent}Level {level_idx}: {level_structure}")
         
         lines.append(f"\nTotal Outputs: {self.config.total_outputs}")
+        
+        # Show output pools if configured
+        if self.config.has_pools:
+            lines.append(f"\nOutput Pools ({len(self.config.pool_names)}):")
+            for pool_name in self.config.pool_names:
+                pool_cfg = self.config.get_pool_config(pool_name)
+                lines.append(
+                    f"  {pool_name}: {pool_cfg['strategy']}({len(pool_cfg['tasks'])} tasks) "
+                    f"-> {pool_cfg['task_type']}"
+                )
+        
         lines.append("=" * 50)
         
         return "\n".join(lines)
@@ -535,6 +662,36 @@ class MultiTaskModel(tf.keras.Model):
         
         return task_info
     
+    def get_pool_info(self) -> List[Dict[str, Any]]:
+        """Get information about each output pool.
+        
+        Returns a list where each element corresponds to a pooled output:
+        - 'name': Pool name
+        - 'strategy': Pooling operation ('max', 'mean', 'min')
+        - 'task_type': Type of the pooled output ('binary', etc.)
+        - 'num_classes': Number of classes for the pooled output
+        - 'constituent_tasks': List of task names that are pooled
+        
+        Returns:
+            List of dictionaries with pool information, or empty list if
+            no pools are configured.
+        """
+        if not self.config.has_pools:
+            return []
+        
+        pool_info = []
+        for pool_name in self.config.pool_names:
+            pool_cfg = self.config.get_pool_config(pool_name)
+            pool_info.append({
+                'name': pool_name,
+                'strategy': pool_cfg['strategy'],
+                'task_type': pool_cfg['task_type'],
+                'num_classes': pool_cfg['num_classes'],
+                'constituent_tasks': pool_cfg['tasks'],
+            })
+        
+        return pool_info
+    
     def _build_parent_paths(self) -> List[List[int]]:
         """Build the hierarchical paths for all outputs.
         
@@ -566,7 +723,8 @@ class MultiTaskModel(tf.keras.Model):
             
             current_paths = next_paths
         
-        return current_paths    
+        return current_paths 
+       
     def flatten_outputs(
         self, 
         output_dict: Dict[str, tf.Tensor]
@@ -611,30 +769,38 @@ class MultiTaskModel(tf.keras.Model):
         """Convert concatenated tensor back to dictionary format.
         
         Reverse of flatten_outputs. Useful after processing with external tools.
+        Handles both architectural task outputs and pooled outputs.
         
         Args:
             concatenated_tensor: Tensor output shape [batch_size, total_output_dims]
             
         Returns:
-            Dictionary with task outputs matching original structure
+            Dictionary with task outputs matching original structure,
+            plus pooled outputs if configured.
             
         Example:
             >>> external_result = external_tool(tensor_output)
             >>> output_dict = model.unflatten_outputs(external_result)
             >>> # output_dict['task_0'] has shape [batch_size, 1]
             >>> # output_dict['task_2'] has shape [batch_size, 5]
+            >>> # output_dict['propaganda'] has shape [batch_size, 1]  (if pooled)
         """
         if self.task_names is None:
             task_names = [f'task_{i}' for i in range(self.config.total_outputs)]
         else:
             task_names = self.task_names
         
+        # First, unflatten the architectural task outputs
         output_dict = {}
         start = 0
         for task_name in task_names:
             output_dim = self.config.get_output_dim_for_task(task_names.index(task_name))
             output_dict[task_name] = concatenated_tensor[:, start:start+output_dim]
             start += output_dim
+        
+        # Then derive pooled outputs from the unflattened task outputs
+        pooled_outputs = self._compute_pooled_outputs(output_dict)
+        output_dict.update(pooled_outputs)
         
         return output_dict
     
@@ -907,6 +1073,7 @@ class MultiTaskModel(tf.keras.Model):
             'branch_layer_sizes': self.config.branch_layer_sizes,
             'default_layer_sizes': self.config.default_layer_sizes,
             'pooling_strategy': self.config.pooling_strategy,
+            'output_pools': self.config.output_pools,
             **self.config.encoder_config.to_dict_for_save(),
         }
         

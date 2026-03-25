@@ -253,6 +253,21 @@ class ModelConfig:
             * Outputs on each of 7 branches: 1 + 2 + 1 + 1 + 1 + 2 = 8
     
     Layer sizes can be specified per branch level, or use defaults for all levels.
+    
+    Output Pools: 
+        Optional grouping of final task outputs into aggregate predictions.
+        Pooling is applied at inference time only and training uses individual task
+        losses. This is useful when multiple tasks should be summarized
+        into a coarser prediction
+    Format: Dict mapping pool name to pool configuration dict:
+            {
+                "pool_name": {
+                    "tasks": ["task_a", "task_b", ...],
+                    "strategy": "max",                    # pooling op: 'max', 'mean', 'min' (required)
+                    "task_type": "binary",                # type of pooled output (default: 'binary')
+                    "num_classes": 2,                     # classes for pooled output (default: 2)
+                }
+            }
     """
     # Model hyperparameters
     dropout_rate: float = 0.1
@@ -301,6 +316,11 @@ class ModelConfig:
     # Must be a list of length equal to total_tasks
     # Example: [2, 2, 5, 2, 2, 3, 2, 2, 2, 2] for 10 tasks (some binary, some multiclass)
     num_classes_per_task: Optional[List[int]] = None
+    
+    # Output pooling: group final task outputs into aggregate predictions.
+    # Pooled outputs are derived at inference from individual task outputs.
+    # They are NOT included in the training loss.
+    output_pools: Optional[Dict[str, Dict[str, Any]]] = None
     
     def __post_init__(self):
         """Validate configuration after initialization."""
@@ -418,7 +438,209 @@ class ModelConfig:
                     f"task_names length ({len(self.task_names)}) must equal "
                     f"total_outputs ({self.total_outputs})"
                 )
+                
+        # validate output_pools if provided
+        self._validate_output_pools()
     
+    def _validate_output_pools(self):
+        """Validate output_pools configuration.
+        
+        Checks:
+            1. output_pools is a dict (if provided)
+            2. Each pool has required 'tasks' (list[str]) and 'strategy' (str) fields
+            3. Pool names don't collide with task_names
+            4. All referenced task names exist in task_names
+            5. A task cannot belong to multiple pools
+            6. Strategy is one of: 'max', 'mean', 'min'
+            7. Optional task_type is valid
+            8. Optional num_classes is >= 2
+            9. Each pool references at least 2 tasks
+        """
+        if self.output_pools is None:
+            return
+        
+        if not isinstance(self.output_pools, dict):
+            raise ValueError("output_pools must be a dict mapping pool names to pool configs")
+        
+        # task_names are required when output_pools is used, because we need
+        # to verify that constituent task references actually exist.
+        if self.task_names is None:
+            raise ValueError(
+                "task_names must be provided when using output_pools, "
+                "so that constituent task references can be validated"
+            )
+        
+        task_name_set = set(self.task_names)
+        valid_strategies = {'max', 'mean', 'min'}
+        valid_pool_types = {'binary', 'multiclass', 'multilabel'}
+        
+        # Track which tasks have already been assigned to a pool.
+        # A task can only belong to one pool — otherwise the semantics of
+        # "what does this pooled output mean" become ambiguous.
+        assigned_tasks: Dict[str, str] = {}  # task_name -> pool_name
+        
+        for pool_name, pool_cfg in self.output_pools.items():
+            # --- Basic type checks ---
+            if not isinstance(pool_name, str) or not pool_name:
+                raise ValueError("Pool names must be non-empty strings")
+            
+            if not isinstance(pool_cfg, dict):
+                raise ValueError(
+                    f"Pool '{pool_name}' config must be a dict, "
+                    f"got {type(pool_cfg).__name__}"
+                )
+            
+            # --- Pool name must not collide with any architectural task name ---
+            if pool_name in task_name_set:
+                raise ValueError(
+                    f"Pool name '{pool_name}' conflicts with an existing task name. "
+                    f"Pool names must be distinct from task names."
+                )
+            
+            # --- Required fields ---
+            if 'tasks' not in pool_cfg:
+                raise ValueError(
+                    f"Pool '{pool_name}' is missing required field 'tasks' "
+                    f"(list of constituent task names)"
+                )
+            if 'strategy' not in pool_cfg:
+                raise ValueError(
+                    f"Pool '{pool_name}' is missing required field 'strategy' "
+                    f"(pooling operation: {valid_strategies})"
+                )
+            
+            # --- Validate 'tasks' field ---
+            constituent_tasks = pool_cfg['tasks']
+            
+            if not isinstance(constituent_tasks, list) or len(constituent_tasks) < 2:
+                raise ValueError(
+                    f"Pool '{pool_name}': 'tasks' must be a list of at least 2 task names"
+                )
+            
+            for task_name in constituent_tasks:
+                if task_name not in task_name_set:
+                    raise ValueError(
+                        f"Pool '{pool_name}' references task '{task_name}' which is not "
+                        f"in task_names. Available tasks: {sorted(task_name_set)}"
+                    )
+                
+                if task_name in assigned_tasks:
+                    raise ValueError(
+                        f"Task '{task_name}' is referenced by pool '{pool_name}' but is "
+                        f"already assigned to pool '{assigned_tasks[task_name]}'. "
+                        f"A task cannot belong to multiple pools."
+                    )
+                assigned_tasks[task_name] = pool_name
+            
+            # --- Validate 'strategy' field ---
+            strategy = pool_cfg['strategy']
+            if strategy not in valid_strategies:
+                raise ValueError(
+                    f"Pool '{pool_name}': strategy '{strategy}' is not supported. "
+                    f"Must be one of {valid_strategies}"
+                )
+            
+            # --- Validate optional 'task_type' field (default: 'binary') ---
+            pool_task_type = pool_cfg.get('task_type', 'binary')
+            if pool_task_type not in valid_pool_types:
+                raise ValueError(
+                    f"Pool '{pool_name}': task_type '{pool_task_type}' is not valid. "
+                    f"Must be one of {valid_pool_types}"
+                )
+            
+            # --- Validate optional 'num_classes' field (default: 2) ---
+            pool_num_classes = pool_cfg.get('num_classes', 2)
+            if not isinstance(pool_num_classes, int) or pool_num_classes < 2:
+                raise ValueError(
+                    f"Pool '{pool_name}': num_classes must be an integer >= 2, "
+                    f"got {pool_num_classes}"
+                )
+            
+            # --- Cross-validate task_type and num_classes ---
+            if pool_task_type == 'binary' and pool_num_classes != 2:
+                raise ValueError(
+                    f"Pool '{pool_name}': task_type is 'binary' but num_classes={pool_num_classes}. "
+                    f"Binary pools should have num_classes=2."
+                )
+            elif pool_task_type == 'multiclass' and pool_num_classes < 3:
+                raise ValueError(
+                    f"Pool '{pool_name}': task_type is 'multiclass' but num_classes={pool_num_classes}. "
+                    f"Multiclass pools should have num_classes >= 3."
+                )
+    
+    # output pool helpers
+    @property
+    def pool_names(self) -> List[str]:
+        """Names of all configured output pools, sorted alphabetically.
+        
+        Returns empty list if no pools are configured.
+        """
+        if self.output_pools is None:
+            return []
+        return sorted(self.output_pools.keys())
+    
+    @property
+    def all_output_names(self) -> List[str]:
+        """All output names: architectural task names followed by pool names.
+        
+        Task names appear first (in their original order), then pool names
+        (sorted alphabetically). This ordering is stable and predictable.
+        """
+        task_names = self.task_names or [f'task_{i}' for i in range(self.total_outputs)]
+        return list(task_names) + self.pool_names
+    
+    @property
+    def has_pools(self) -> bool:
+        """Whether any output pools are configured."""
+        return self.output_pools is not None and len(self.output_pools) > 0
+    
+    def get_pool_config(self, pool_name: str) -> Dict[str, Any]:
+        """Get the full configuration for a specific pool, with defaults filled in.
+        
+        Args:
+            pool_name: Name of the pool.
+            
+        Returns:
+            Dict with keys: 'tasks', 'strategy', 'task_type', 'num_classes'.
+            Optional fields are populated with their defaults so callers
+            always receive a complete dict.
+            
+        Raises:
+            KeyError: If pool_name is not a configured pool.
+        """
+        if self.output_pools is None or pool_name not in self.output_pools:
+            raise KeyError(
+                f"No pool named '{pool_name}'. "
+                f"Available pools: {self.pool_names}"
+            )
+        
+        raw = self.output_pools[pool_name]
+        return {
+            'tasks': raw['tasks'],
+            'strategy': raw['strategy'],
+            'task_type': raw.get('task_type', 'binary'),
+            'num_classes': raw.get('num_classes', 2),
+        }
+    
+    def get_pool_task_type(self, pool_name: str) -> str:
+        """Get the task type of a pooled output ('binary', 'multiclass', etc.)."""
+        return self.get_pool_config(pool_name)['task_type']
+    
+    def get_pool_num_classes(self, pool_name: str) -> int:
+        """Get the number of classes for a pooled output."""
+        return self.get_pool_config(pool_name)['num_classes']
+    
+    def is_pool(self, name: str) -> bool:
+        """Check whether a name refers to a pooled output vs. an architectural task.
+        
+        Useful in code that iterates over all_output_names and needs to
+        branch on whether an output is a real task or a derived pool.
+        """
+        if self.output_pools is None:
+            return False
+        return name in self.output_pools          
+                
+    # Architectural helpers
     def get_layer_sizes(self, branch_level: int) -> List[int]:
         """Get layer sizes for a specific branch level.
         

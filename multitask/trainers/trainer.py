@@ -334,7 +334,81 @@ class Trainer:
                     raise ValueError(f"Optimizer {opt_type} does not have attribute '{key}' for optimizer_kwargs")
         
         return optimizer
+    
+    def _derive_pooled_labels(
+        self,
+        y_true_dict: Dict[str, np.ndarray],
+        mask_value: int = -1
+    ) -> Dict[str, np.ndarray]:
+        """Derive ground-truth labels for pooled outputs from task labels.
         
+        Applies the same pooling strategy to ground-truth labels as the model
+        applies to predictions.  Handles masking: if ALL labels for
+        an observation are masked, the pooled label is masked; otherwise the
+        pool is computed over non-masked constituents only.
+        
+        Args:
+            y_true_dict: Dictionary of true labels {task_name: array} — task-level
+                         only (no pool keys expected).
+            mask_value: Value indicating missing labels (default: -1).
+            
+        Returns:
+            Dictionary of {pool_name: pooled_labels_array} for each configured pool.
+            Empty dict if no pools are configured.
+        """
+        if not self.model.config.has_pools:
+            return {}
+        
+        pooled_labels = {}
+        for pool_name in self.model.config.pool_names:
+            pool_cfg = self.model.config.get_pool_config(pool_name)
+            strategy = pool_cfg['strategy']
+            constituent_tasks = pool_cfg['tasks']
+            
+            # Gather constituent label arrays.
+            # Each is shape [n_samples] or [n_samples, 1] for binary tasks.
+            constituent_arrays = []
+            for t in constituent_tasks:
+                arr = y_true_dict[t]
+                # Flatten to 1D if [n_samples, 1]
+                if arr.ndim > 1 and arr.shape[-1] == 1:
+                    arr = arr.ravel()
+                constituent_arrays.append(arr)
+            
+            # Stack: shape [n_samples, n_tasks]
+            stacked = np.stack(constituent_arrays, axis=1)
+            
+            # Build mask: True where the label is NOT masked
+            valid = (stacked != mask_value)
+            
+            # If ALL constituents are masked for an observation, the pool is masked.
+            all_masked = ~valid.any(axis=1)  # [n_samples]
+            
+            # Replace masked entries with NaN so they don't affect the pool op,
+            # then apply the strategy over axis=1.
+            stacked_float = stacked.astype(np.float64)
+            stacked_float[~valid] = np.nan
+            
+            with np.errstate(all='ignore'):  # suppress nanmean warnings for all-NaN slices
+                if strategy == 'max':
+                    pooled = np.nanmax(stacked_float, axis=1)
+                elif strategy == 'mean':
+                    pooled = np.nanmean(stacked_float, axis=1)
+                elif strategy == 'min':
+                    pooled = np.nanmin(stacked_float, axis=1)
+                else:
+                    raise ValueError(f"Unknown pooling strategy: {strategy}")
+            
+            # Restore mask value for fully-masked observations
+            pooled[all_masked] = mask_value
+            
+            # For binary pool ground truth with 'mean' strategy, the result is
+            # fractional (e.g., 0.33 if 1 of 3 task is positive).
+            # Threshold optimization will handle this — no rounding here.
+            
+            pooled_labels[pool_name] = pooled.astype(np.float32)
+        
+        return pooled_labels
     
     def _find_optimal_thresholds(
         self,
@@ -348,26 +422,33 @@ class Trainer:
         the optimal threshold for each binary/multilabel task independently.
         Multiclass tasks don't use thresholds (use argmax instead).
         
+        Handles both architectural task names and pooled output names.
+        
         Args:
-            y_true_dict: Dictionary of true labels {task_name: [n_samples, n_classes]}
-            y_pred_dict: Dictionary of predicted probabilities {task_name: [n_samples, n_classes]}
+            y_true_dict: Dictionary of true labels {name: [n_samples, ...]}
+                         May contain both task names and pool names.
+            y_pred_dict: Dictionary of predicted probabilities {name: [n_samples, ...]}
             mask_value: Value indicating missing labels
             
         Returns:
             Tuple of (thresholds_dict, f1_scores_dict)
-            where task_name -> float for tasks with thresholds, None for multiclass
+            where name -> float for outputs with thresholds, None for multiclass
         """
         thresholds = {}
         f1_scores = {}
         
-        task_names = sorted(y_true_dict.keys())
+        output_names = sorted(y_true_dict.keys())
         
-        for task_name in task_names:
-            task_idx = list(self.model.task_names).index(task_name) if self.model.task_names else int(task_name.split('_')[-1])
-            task_type = self.model.config.get_task_type(task_idx)
+        for name in output_names:
+            # Look up task type: pool or architectural task
+            if self.model.config.is_pool(name):
+                task_type = self.model.config.get_pool_task_type(name)
+            else:
+                task_idx = list(self.model.task_names).index(name) if self.model.task_names else int(name.split('_')[-1])
+                task_type = self.model.config.get_task_type(task_idx)
             
-            y_task_true = y_true_dict[task_name]
-            y_task_pred = y_pred_dict[task_name]
+            y_task_true = y_true_dict[name]
+            y_task_pred = y_pred_dict[name]
             
             # For binary/multilabel, flatten to 1D if needed
             if task_type in ['binary', 'multilabel'] and y_task_pred.ndim > 1:
@@ -380,28 +461,37 @@ class Trainer:
             y_task_pred = y_task_pred[valid_mask]
             
             if len(y_task_true) == 0:
-                # No valid samples for this task
-                thresholds[task_name] = 0.5
-                f1_scores[task_name] = 0.0
+                # No valid samples for this output
+                thresholds[name] = 0.5
+                f1_scores[name] = 0.0
                 continue
             
             if task_type == 'multiclass':
                 # Multiclass doesn't use thresholds - use argmax
-                thresholds[task_name] = None
-                f1_scores[task_name] = 0.0
+                thresholds[name] = None
+                f1_scores[name] = 0.0
             else:
                 # Binary or multilabel: find optimal threshold
-                fpr, tpr, thresh = roc_curve(y_task_true, y_task_pred)
+                # For pooled binary labels with 'max' strategy, ground truth
+                # is already 0/1 so roc_curve works directly.
+                # For 'mean' strategy, ground truth may be fractional —
+                # binarize it for roc_curve.
+                y_true_for_roc = y_task_true
+                if self.model.config.is_pool(name):
+                    # Binarize fractional pooled labels for ROC computation
+                    y_true_for_roc = (y_task_true > 0).astype(int)
+                
+                fpr, tpr, thresh = roc_curve(y_true_for_roc, y_task_pred)
                 j_scores = tpr - fpr
                 optimal_idx = np.argmax(j_scores)
                 optimal_threshold = thresh[optimal_idx]
                 
                 # Calculate F1 with optimal threshold
                 y_task_pred_binary = (y_task_pred > optimal_threshold).astype(int)
-                f1 = f1_score(y_task_true, y_task_pred_binary, average='weighted', zero_division=0)
+                f1 = f1_score(y_true_for_roc, y_task_pred_binary, average='weighted', zero_division=0)
                 
-                thresholds[task_name] = float(optimal_threshold)
-                f1_scores[task_name] = float(f1)
+                thresholds[name] = float(optimal_threshold)
+                f1_scores[name] = float(f1)
         
         return thresholds, f1_scores
     
@@ -726,19 +816,22 @@ class Trainer:
                 print("\nFinding optimal classification thresholds...")
                 y_val_pred_dict = self.model.predict(val_dataset, verbose=0)
                 
-                # Extract true labels from validation dataset as dictionary
-                y_val_true_dict = {}
-                task_names = sorted(y_val_pred_dict.keys())
-                
-                for task_name in task_names:
-                    y_val_true_dict[task_name] = []
+                # Extract true labels from validation dataset as dictionary.
+                # The dataset only contains architectural task labels — pool
+                # labels will be derived below.
+                task_names_list = self.model.task_names or [f'task_{i}' for i in range(self.model.config.total_outputs)]
+                y_val_true_dict = {name: [] for name in task_names_list}
                 
                 for _, labels_dict in val_dataset:
-                    for task_name in task_names:
+                    for task_name in task_names_list:
                         y_val_true_dict[task_name].append(labels_dict[task_name].numpy())
                 
-                for task_name in task_names:
+                for task_name in task_names_list:
                     y_val_true_dict[task_name] = np.concatenate(y_val_true_dict[task_name], axis=0)
+                
+                # Derive pooled ground-truth labels from task labels
+                pooled_true = self._derive_pooled_labels(y_val_true_dict)
+                y_val_true_dict.update(pooled_true)
                 
                 self.optimal_thresholds, f1_scores = self._find_optimal_thresholds(
                     y_val_true_dict, y_val_pred_dict
@@ -760,6 +853,14 @@ class Trainer:
                     else:
                         # Binary or multilabel: use 0.5 as default
                         self.optimal_thresholds[task_name] = 0.5
+                
+                # Add default thresholds for pools
+                for pool_name in self.model.config.pool_names:
+                    pool_type = self.model.config.get_pool_task_type(pool_name)
+                    if pool_type == 'multiclass':
+                        self.optimal_thresholds[pool_name] = None
+                    else:
+                        self.optimal_thresholds[pool_name] = 0.5
             
             # Always return tuple for consistency
             return self.history, self.optimal_thresholds
@@ -774,9 +875,9 @@ class Trainer:
         """Evaluate the model on a dataset.
         
         Computes specified metrics on the provided dataset. Handles mixed task types
-        (binary, multiclass, multilabel). Can use stored thresholds from training
-        (if optimize_thresholds=True was used in fit()), custom thresholds, or
-        compute probability-based metrics only.
+        (binary, multiclass, multilabel) and pooled outputs. Can use stored thresholds
+        from training (if optimize_thresholds=True was used in fit()), custom
+        thresholds, or compute probability-based metrics only.
         
         Threshold Usage:
             - If thresholds is None and self.optimal_thresholds exists: uses stored thresholds
@@ -796,10 +897,11 @@ class Trainer:
             
         Returns:
             Dictionary containing:
-                - 'probabilities_dict': Dict of predicted probabilities {task_name: [n_samples, n_classes]}
+                - 'probabilities_dict': Dict of predicted probabilities {name: [n_samples, n_classes]}
                 - 'predictions_dict': Dict of binary predictions (if thresholds provided)
                 - 'task_metrics': Per-task metrics dict {task_name: {metric: value}}
-                - 'overall_metrics': Overall metrics dict {metric: average_value}
+                - 'pool_metrics': Per-pool metrics dict {pool_name: {metric: value}} (if pools configured)
+                - 'overall_metrics': Overall metrics dict {metric: average_value} (tasks only)
                 - 'thresholds_used': Dict of thresholds used (if applicable)
                 
         Example:
@@ -812,23 +914,28 @@ class Trainer:
             >>> # Probability-based metrics only
             >>> results = trainer.evaluate(test_dataset, metrics=['auc', 'average_precision'])
         """
-        # Get predictions
+        # Get predictions (includes both task and pool outputs)
         print("Generating predictions...")
         y_pred_dict = self.model.predict(dataset, verbose=0)
         
-        # Extract true labels as dictionary
-        y_true_dict = {}
-        task_names = sorted(y_pred_dict.keys())
-        
-        for task_name in task_names:
-            y_true_dict[task_name] = []
+        # Extract true labels for architectural tasks only from dataset.
+        # The dataset does not contain pool labels — those are derived.
+        task_names_list = self.model.task_names or [f'task_{i}' for i in range(self.model.config.total_outputs)]
+        y_true_dict = {name: [] for name in task_names_list}
         
         for _, labels_dict in dataset:
-            for task_name in task_names:
+            for task_name in task_names_list:
                 y_true_dict[task_name].append(labels_dict[task_name].numpy())
         
-        for task_name in task_names:
+        for task_name in task_names_list:
             y_true_dict[task_name] = np.concatenate(y_true_dict[task_name], axis=0)
+        
+        # Derive pooled ground-truth labels
+        pooled_true = self._derive_pooled_labels(y_true_dict, mask_value=mask_value)
+        y_true_dict.update(pooled_true)
+        
+        # All output names: tasks + pools
+        all_output_names = sorted(y_pred_dict.keys())
         
         # Determine which thresholds to use
         use_thresholds = thresholds if thresholds is not None else self.optimal_thresholds
@@ -836,10 +943,8 @@ class Trainer:
         # Determine which metrics to compute
         if metrics is None:
             if use_thresholds is not None:
-                # Can compute all metrics
                 metrics = ['accuracy', 'precision', 'recall', 'f1', 'auc', 'average_precision']
             else:
-                # Only probability-based metrics
                 metrics = ['auc', 'average_precision']
         
         # Validate metrics
@@ -855,108 +960,137 @@ class Trainer:
         y_pred_binary_dict = None
         if use_thresholds is not None:
             y_pred_binary_dict = {}
-            for task_name in task_names:
-                task_idx = list(self.model.task_names).index(task_name) if self.model.task_names else task_names.index(task_name)
-                task_type = self.model.config.get_task_type(task_idx)
+            for name in all_output_names:
+                # Look up task type
+                if self.model.config.is_pool(name):
+                    task_type = self.model.config.get_pool_task_type(name)
+                else:
+                    task_idx = list(self.model.task_names).index(name) if self.model.task_names else all_output_names.index(name)
+                    task_type = self.model.config.get_task_type(task_idx)
                 
                 if task_type == 'multiclass':
-                    # Multiclass: use argmax
-                    y_pred_binary_dict[task_name] = np.argmax(y_pred_dict[task_name], axis=1)
+                    y_pred_binary_dict[name] = np.argmax(y_pred_dict[name], axis=1)
                 else:
-                    # Binary/multilabel: use threshold
-                    threshold = use_thresholds.get(task_name, 0.5)
-                    y_pred_binary_dict[task_name] = (y_pred_dict[task_name][:, 0] > threshold).astype(int)
+                    threshold = use_thresholds.get(name, 0.5)
+                    y_pred_binary_dict[name] = (y_pred_dict[name][:, 0] > threshold).astype(int)
         
-        # Compute metrics per task
+        # Compute metrics per output (tasks and pools)
         task_metrics = {}
+        pool_metrics = {}
         overall_metrics = {metric: [] for metric in metrics}
         
-        for task_name in task_names:
-            task_idx = list(self.model.task_names).index(task_name) if self.model.task_names else task_names.index(task_name)
-            task_type = self.model.config.get_task_type(task_idx)
+        for name in all_output_names:
+            is_pool = self.model.config.is_pool(name)
             
-            y_task_true = y_true_dict[task_name]
-            y_task_pred_probs = y_pred_dict[task_name]
+            # Look up task type
+            if is_pool:
+                task_type = self.model.config.get_pool_task_type(name)
+            else:
+                task_idx = list(self.model.task_names).index(name) if self.model.task_names else all_output_names.index(name)
+                task_type = self.model.config.get_task_type(task_idx)
+            
+            y_out_true = y_true_dict[name]
+            y_out_pred_probs = y_pred_dict[name]
             
             # Filter out masked values
-            valid_mask = y_task_true != mask_value
-            if y_task_true.ndim > 1:
-                # For multiclass, mask first dimension
-                valid_mask = valid_mask[:, 0] if valid_mask.shape[1] > 0 else np.ones(y_task_true.shape[0], dtype=bool)
+            valid_mask = y_out_true != mask_value
+            if y_out_true.ndim > 1:
+                valid_mask = valid_mask[:, 0] if valid_mask.shape[1] > 0 else np.ones(y_out_true.shape[0], dtype=bool)
             
-            y_task_true_valid = y_task_true[valid_mask]
-            y_task_pred_probs_valid = y_task_pred_probs[valid_mask]
+            y_out_true_valid = y_out_true[valid_mask]
+            y_out_pred_probs_valid = y_out_pred_probs[valid_mask]
             
-            if len(y_task_true_valid) == 0:
-                # No valid samples for this task
-                task_metrics[task_name] = {metric: None for metric in metrics}
+            if len(y_out_true_valid) == 0:
+                results_for_output = {metric: None for metric in metrics}
+                if is_pool:
+                    pool_metrics[name] = results_for_output
+                else:
+                    task_metrics[name] = results_for_output
                 continue
             
-            task_results = {}
+            output_results = {}
+            
+            # For pooled binary labels with 'mean' strategy, ground truth
+            # may be fractional — binarize for classification metrics.
+            y_out_true_binary = y_out_true_valid
+            if is_pool and task_type != 'multiclass':
+                y_out_true_binary = (y_out_true_valid > 0).astype(int)
+                if y_out_true_binary.ndim > 1:
+                    y_out_true_binary = y_out_true_binary[:, 0]
+            elif y_out_true_valid.ndim > 1:
+                y_out_true_binary = y_out_true_valid[:, 0]
             
             # Compute binary metrics if thresholds available
             if use_thresholds is not None and task_type != 'multiclass':
-                y_task_pred_binary = y_pred_binary_dict[task_name][valid_mask]
-                y_task_true_binary = y_task_true_valid[:, 0] if y_task_true_valid.ndim > 1 else y_task_true_valid
+                y_out_pred_binary = y_pred_binary_dict[name][valid_mask]
                 
                 if 'accuracy' in metrics:
-                    acc = accuracy_score(y_task_true_binary, y_task_pred_binary)
-                    task_results['accuracy'] = float(acc)
-                    overall_metrics['accuracy'].append(acc)
+                    acc = accuracy_score(y_out_true_binary, y_out_pred_binary)
+                    output_results['accuracy'] = float(acc)
+                    if not is_pool:
+                        overall_metrics['accuracy'].append(acc)
                 
                 if 'precision' in metrics:
-                    prec = precision_score(y_task_true_binary, y_task_pred_binary, zero_division=0)
-                    task_results['precision'] = float(prec)
-                    overall_metrics['precision'].append(prec)
+                    prec = precision_score(y_out_true_binary, y_out_pred_binary, zero_division=0)
+                    output_results['precision'] = float(prec)
+                    if not is_pool:
+                        overall_metrics['precision'].append(prec)
                 
                 if 'recall' in metrics:
-                    rec = recall_score(y_task_true_binary, y_task_pred_binary, zero_division=0)
-                    task_results['recall'] = float(rec)
-                    overall_metrics['recall'].append(rec)
+                    rec = recall_score(y_out_true_binary, y_out_pred_binary, zero_division=0)
+                    output_results['recall'] = float(rec)
+                    if not is_pool:
+                        overall_metrics['recall'].append(rec)
                 
                 if 'f1' in metrics:
-                    f1 = f1_score(y_task_true_binary, y_task_pred_binary, zero_division=0)
-                    task_results['f1'] = float(f1)
-                    overall_metrics['f1'].append(f1)
+                    f1 = f1_score(y_out_true_binary, y_out_pred_binary, zero_division=0)
+                    output_results['f1'] = float(f1)
+                    if not is_pool:
+                        overall_metrics['f1'].append(f1)
             elif task_type == 'multiclass' and use_thresholds is not None:
-                # Multiclass with argmax
-                y_task_pred_classes = y_pred_binary_dict[task_name][valid_mask]
-                y_task_true_classes = y_task_true_valid[:, 0] if y_task_true_valid.ndim > 1 else y_task_true_valid
+                y_out_pred_classes = y_pred_binary_dict[name][valid_mask]
+                y_out_true_classes = y_out_true_valid[:, 0] if y_out_true_valid.ndim > 1 else y_out_true_valid
                 
                 if 'accuracy' in metrics:
-                    acc = accuracy_score(y_task_true_classes, y_task_pred_classes)
-                    task_results['accuracy'] = float(acc)
-                    overall_metrics['accuracy'].append(acc)
+                    acc = accuracy_score(y_out_true_classes, y_out_pred_classes)
+                    output_results['accuracy'] = float(acc)
+                    if not is_pool:
+                        overall_metrics['accuracy'].append(acc)
                 
                 if 'f1' in metrics:
-                    f1 = f1_score(y_task_true_classes, y_task_pred_classes, average='weighted', zero_division=0)
-                    task_results['f1'] = float(f1)
-                    overall_metrics['f1'].append(f1)
+                    f1 = f1_score(y_out_true_classes, y_out_pred_classes, average='weighted', zero_division=0)
+                    output_results['f1'] = float(f1)
+                    if not is_pool:
+                        overall_metrics['f1'].append(f1)
             
             # Compute probability-based metrics
             if 'auc' in metrics and task_type in ['binary', 'multilabel']:
                 try:
-                    y_probs_for_auc = y_task_pred_probs_valid[:, 0] if y_task_pred_probs_valid.ndim > 1 else y_task_pred_probs_valid
-                    y_true_for_auc = y_task_true_valid[:, 0] if y_task_true_valid.ndim > 1 else y_task_true_valid
-                    auc = roc_auc_score(y_true_for_auc, y_probs_for_auc)
-                    task_results['auc'] = float(auc)
-                    overall_metrics['auc'].append(auc)
+                    y_probs_for_auc = y_out_pred_probs_valid[:, 0] if y_out_pred_probs_valid.ndim > 1 else y_out_pred_probs_valid
+                    auc = roc_auc_score(y_out_true_binary, y_probs_for_auc)
+                    output_results['auc'] = float(auc)
+                    if not is_pool:
+                        overall_metrics['auc'].append(auc)
                 except ValueError:
-                    task_results['auc'] = None
+                    output_results['auc'] = None
             
             if 'average_precision' in metrics and task_type in ['binary', 'multilabel']:
                 try:
-                    y_probs_for_ap = y_task_pred_probs_valid[:, 0] if y_task_pred_probs_valid.ndim > 1 else y_task_pred_probs_valid
-                    y_true_for_ap = y_task_true_valid[:, 0] if y_task_true_valid.ndim > 1 else y_task_true_valid
-                    ap = average_precision_score(y_true_for_ap, y_probs_for_ap)
-                    task_results['average_precision'] = float(ap)
-                    overall_metrics['average_precision'].append(ap)
+                    y_probs_for_ap = y_out_pred_probs_valid[:, 0] if y_out_pred_probs_valid.ndim > 1 else y_out_pred_probs_valid
+                    ap = average_precision_score(y_out_true_binary, y_probs_for_ap)
+                    output_results['average_precision'] = float(ap)
+                    if not is_pool:
+                        overall_metrics['average_precision'].append(ap)
                 except ValueError:
-                    task_results['average_precision'] = None
+                    output_results['average_precision'] = None
             
-            task_metrics[task_name] = task_results
+            # Store in the right bucket
+            if is_pool:
+                pool_metrics[name] = output_results
+            else:
+                task_metrics[name] = output_results
         
-        # Average overall metrics
+        # Average overall metrics (tasks only — pools are reported separately)
         for metric in overall_metrics:
             valid_scores = [s for s in overall_metrics[metric] if s is not None]
             if valid_scores:
@@ -971,6 +1105,9 @@ class Trainer:
             'overall_metrics': overall_metrics
         }
         
+        if pool_metrics:
+            results['pool_metrics'] = pool_metrics
+        
         if y_pred_binary_dict is not None:
             results['predictions_dict'] = y_pred_binary_dict
             results['thresholds_used'] = use_thresholds
@@ -984,6 +1121,16 @@ class Trainer:
                 print(f"{metric.upper():20s}: {value:.4f}")
             else:
                 print(f"{metric.upper():20s}: N/A")
+        
+        if pool_metrics:
+            print("-" * 60)
+            print("Pool Metrics:")
+            for pool_name, pm in sorted(pool_metrics.items()):
+                metric_strs = []
+                for m, v in sorted(pm.items()):
+                    metric_strs.append(f"{m}={v:.4f}" if v is not None else f"{m}=N/A")
+                print(f"  {pool_name}: {', '.join(metric_strs)}")
+        
         print("=" * 60 + "\n")
         
         return results

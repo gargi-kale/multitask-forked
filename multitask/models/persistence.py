@@ -161,6 +161,8 @@ def load_model(
     print(f"  - Encoder type: {model.encoder_type or 'embeddings'}")
     task_names = model.config.task_names or [f'task_{i}' for i in range(model.config.total_outputs)]
     print(f"  - Tasks: {', '.join(task_names)}")
+    if model.config.has_pools:
+        print(f"  - Output pools: {', '.join(model.config.pool_names)}")
     print(f"  - Trainable parameters: {model.count_params():,}")
     if thresholds:
         print(f"  - Thresholds: {list(thresholds.keys())}")
