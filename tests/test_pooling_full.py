@@ -38,10 +38,6 @@ from multitask.trainers.trainer import Trainer
 from multitask.models.persistence import load_model
 
 
-# ======================================================================
-# Data loading
-# ======================================================================
-
 # 2 propaganda technique columns (original CSV headers)
 _PROP_COLUMNS = ["Loaded_Language", "Slogans"]
 
