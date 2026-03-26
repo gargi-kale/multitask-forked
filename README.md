@@ -44,27 +44,35 @@ pip install tensorflow-hub transformers
 ## Quick Start
 
 ```python
-from multitask import ModelConfig, TrainingConfig, MultiTaskModel, Trainer
-import pandas as pd
+from multitask import ModelConfig, TrainingConfig, MultiTaskModel, Trainer, EncoderConfig
+from multitask.config import EncoderIntegration, EncoderInputType
 
-# Configure model with mixed tasks
-config = ModelConfig(
-    tasks={
-        'sentiment': {'type': 'multiclass', 'num_classes': 3},
-        'toxicity': {'type': 'binary', 'num_classes': 1},
-        'emotions': {'type': 'multilabel', 'num_classes': 5},
-    },
-    encoder_type='tfhub',
-    encoder_name='https://tfhub.dev/google/universal-sentence-encoder/4',
+# Configure universal sentence encoder
+encoder_config = EncoderConfig(
+    encoder_integration=EncoderIntegration.TFHUB,
+    encoder_input_type=EncoderInputType.RAW_STRING,
+    encoder_identifier='https://tfhub.dev/google/universal-sentence-encoder/4',
 )
 
-# Train
-data = pd.read_csv('data.csv')  # Needs: text, sentiment, toxicity, emotions columns
-trainer = Trainer(MultiTaskModel(config), TrainingConfig())
-history, thresholds = trainer.fit(data, data_val)
+# Three tasks → task_structure must have three outputs (see docs for hierarchical layouts)
+config = ModelConfig(
+    task_structure=[[3]],
+    task_names=['sentiment', 'toxicity', 'emotions'],
+    task_types=['multiclass', 'binary', 'multiclass'],
+    num_classes_per_task=[3, 2, 5],  # binary tasks use num_classes=2
+    encoder_config=encoder_config,
+)
 
-# Predict
-predictions = model.predict(data_test)  # Dict of arrays per task
+model = MultiTaskModel(config)
+
+# Train: build tf.data.Dataset batches of (inputs, labels_dict); see docs/DATA_FORMAT.md
+train_dataset = ...  # e.g. tf.data.Dataset.from_tensor_slices(...) then .batch(...)
+val_dataset = ...
+trainer = Trainer(model, TrainingConfig())
+history, thresholds = trainer.fit(train_dataset, val_dataset, num_tasks=3)
+
+# Predict: pass tensors or numpy matching the model input (e.g. text or embeddings)
+predictions = model.predict(x_test)  # dict[str, Tensor] per task
 ```
 
 ## Data Format
@@ -90,17 +98,27 @@ Add `embedding` column with numpy arrays:
 
 ```python
 import numpy as np
+from multitask.config import EncoderInputType
 
 data['embedding'] = [np.random.randn(768) for _ in range(len(data))]
 
+encoder_config = EncoderConfig(
+    encoder_input_type=EncoderInputType.PRECOMPUTED,
+    embedding_dim=768
+)
+
 config = ModelConfig(
-    tasks={'sentiment': {'type': 'multiclass', 'num_classes': 3}},
-    encoder_type='from_embedding',
-    embedding_dim=768,
+    task_structure=[[1]],
+    task_names=['sentiment'],
+    task_types=['multiclass'],
+    num_classes_per_task=[3],
+    encoder_config=encoder_config
 )
 ```
 
 ### Missing Labels
+
+***TODO: Update this after regression changes.***
 
 Use `-1` to mark missing labels (excluded from loss):
 
@@ -119,32 +137,57 @@ See [DATA_FORMAT.md](docs/DATA_FORMAT.md) for complete documentation.
 ### TensorFlow Hub
 
 ```python
+from multitask.config import EncoderIntegration, EncoderInputType
+
+# Universal Sentence Encoder
+encoder_config = EncoderConfig(
+    encoder_identifier="https://tfhub.dev/google/universal-sentence-encoder/4",
+    encoder_input_type=EncoderInputType.RAW_STRING,
+    encoder_integration=EncoderIntegration.TFHUB
+)
+
 config = ModelConfig(
-    tasks={'sentiment': {'type': 'multiclass', 'num_classes': 3}},
-    encoder_type='tfhub',
-    encoder_name='https://tfhub.dev/google/universal-sentence-encoder/4',
+    task_structure=[[1]],
+    task_names=['sentiment'],
+    task_types=['multiclass'],
+    num_classes_per_task=[3],
+    encoder_config=encoder_config
 )
 ```
 
 ### HuggingFace
 
 ```python
+from multitask.config import EncoderIntegration, EncoderInputType
+
+encoder_config = EncoderConfig(
+    encoder_identifier="bert-base-uncased",
+    encoder_input_type=EncoderInputType.HUGGINGFACE_TOKENS,
+    encoder_integration=EncoderIntegration.HUGGINGFACE
+)
+
 config = ModelConfig(
-    tasks={'sentiment': {'type': 'multiclass', 'num_classes': 3}},
-    encoder_type='huggingface',
-    encoder_name='bert-base-uncased',
-    trainable_encoder=False,  # Freeze weights
+    task_structure=[[1]],
+    task_names=['sentiment'],
+    task_types=['multiclass'],
+    num_classes_per_task=[3],
+    encoder_config=encoder_config
 )
 ```
 
 ### Pre-computed Embeddings
 
 ```python
-config = ModelConfig(
-    tasks={'sentiment': {'type': 'multiclass', 'num_classes': 3}},
-    encoder_type='from_embedding',
-    encoder_name='pre_computed',
+from multitask.config import EncoderInputType
+
+encoder_config = EncoderConfig(
     embedding_dim=768,
+    encoder_input_type=EncoderInputType.PRECOMPUTED,
+)
+
+config = ModelConfig(
+    task_structure=[[1]],
+    encoder_config=encoder_config
 )
 ```
 
@@ -157,7 +200,7 @@ See [ENCODER_SUPPORT.md](docs/ENCODER_SUPPORT.md) for all options.
 ```python
 config = TrainingConfig(batch_size=32, epochs=10, learning_rate=2e-5)
 trainer = Trainer(model, config)
-history, thresholds = trainer.fit(train_data, val_data)
+history, thresholds = trainer.fit(train_dataset, val_dataset, num_tasks=N)
 ```
 
 ### Automatic Weight Computation
@@ -166,13 +209,19 @@ By default, trainer automatically computes:
 - **Task weights**: Inversely proportional to non-masked samples per task
 - **Class weights**: Inversely proportional to class frequency
 
-Override with explicit weights:
+Override with explicit weights. `class_weights` is one dict **per task**: keys are **class indices** (`0`…`K-1` for multiclass; `0` and `1` for binary and for multilabel columns). `task_weights` is one float per task.
 
 ```python
 trainer.fit(
-    train_data, val_data,
-    class_weights=[{0: 1.0, 1: 2.0}, ...],  # Per task
-    task_weights=[1.0, 2.0, ...],
+    train_dataset,
+    val_dataset,
+    num_tasks=3,
+    class_weights=[
+        {0: 1.0, 1: 1.2, 2: 0.8},           # e.g. 3-class sentiment
+        {0: 1.0, 1: 2.0},                   # binary toxicity
+        {0: 1.0, 1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0},  # e.g. 5-class
+    ],
+    task_weights=[1.0, 2.0, 1.0],
 )
 ```
 
@@ -182,7 +231,7 @@ Find optimal thresholds for binary/multilabel tasks:
 
 ```python
 history, thresholds = trainer.fit(
-    train_data, val_data,
+    train_dataset, val_dataset, num_tasks=N,
     optimize_thresholds=True,  # Uses Youden's J statistic
 )
 ```
@@ -201,7 +250,7 @@ with strategy.scope():
     model = MultiTaskModel(config)
     trainer = Trainer(model, training_config, strategy=strategy)
 
-trainer.fit(train_data, val_data)
+trainer.fit(train_dataset, val_dataset, num_tasks=N)
 ```
 
 See [DISTRIBUTED_TRAINING.md](docs/DISTRIBUTED_TRAINING.md).
@@ -210,7 +259,7 @@ See [DISTRIBUTED_TRAINING.md](docs/DISTRIBUTED_TRAINING.md).
 
 ```python
 trainer.fit(
-    train_data, val_data,
+    train_dataset, val_dataset, num_tasks=N,
     checkpoint_dir='checkpoints/exp1',
     checkpoint_monitor='val_loss',
 )
@@ -219,9 +268,9 @@ trainer.fit(
 ### Verbosity
 
 ```python
-trainer.fit(train_data, val_data, verbose=0)  # Silent
-trainer.fit(train_data, val_data, verbose=1)  # Progress (default)
-trainer.fit(train_data, val_data, verbose=2)  # One line per epoch
+trainer.fit(train_dataset, val_dataset, num_tasks=N, verbose=0)  # Silent
+trainer.fit(train_dataset, val_dataset, num_tasks=N, verbose=1)  # Progress (default)
+trainer.fit(train_dataset, val_dataset, num_tasks=N, verbose=2)  # One line per epoch
 ```
 
 ## Model Persistence
@@ -238,7 +287,7 @@ model.save('models/my_model', thresholds=thresholds)
 from multitask import load_model
 
 model, thresholds = load_model('models/my_model')
-predictions = model.predict(test_data)
+predictions = model.predict(x_test)
 ```
 
 See [MODEL_PERSISTENCE.md](docs/MODEL_PERSISTENCE.md).
@@ -249,14 +298,24 @@ See [MODEL_PERSISTENCE.md](docs/MODEL_PERSISTENCE.md).
 
 ```python
 ModelConfig(
-    tasks={...},                      # Task definitions
-    encoder_type='tfhub',             # 'tfhub', 'huggingface', 'from_embedding'
-    encoder_name='...',               # URL or model name
-    embedding_dim=768,                # For from_embedding only
-    shared_hidden_layers=[256, 128],  # Shared layers
-    task_hidden_layers=[64],          # Task-specific layers
-    dropout=0.1,
-    trainable_encoder=False,
+    task_structure=[[3]],            # Branching layout; sets number of outputs
+    task_names=['a', 'b', 'c'],
+    task_types=['binary', 'multiclass', 'multilabel'],
+    num_classes_per_task=[2, 5, 4],
+    shared_layer_sizes=[256, 128],   # Optional dense stack before branches
+    default_layer_sizes=[128, 64],   # Per-branch dense stacks (if not using branch_layer_sizes)
+    dropout_rate=0.1,
+    encoder_config=encoder_config,
+)
+```
+
+### EncoderConfig
+```python
+EncoderConfig(
+    encoder_integration=EncoderIntegration.TFHUB,
+    encoder_input_type=EncoderInputType.TFHUB_TOKENS,
+    encoder_identifier='...',
+    embedding_dim=768,                # Pre-computed / no encoder
 )
 ```
 
@@ -268,7 +327,7 @@ TrainingConfig(
     epochs=10,
     learning_rate=2e-5,
     weight_decay_rate=0.01,
-    dropout=0.1,
+    dropout_rate=0.1,
     early_stopping=True,
     early_stopping_patience=3,
 )
@@ -301,7 +360,9 @@ setup_gpu_memory_growth()
 
 ## API Reference
 
-**Classes:** `MultiTaskModel`, `Trainer`, `ModelConfig`, `TrainingConfig`
+**Package exports** (`from multitask import ...`): `MultiTaskModel`, `Trainer`, `ModelConfig`, `TrainingConfig`, `EncoderConfig`, `load_model`, and distributed helpers above.
+
+**Enums** (import from `multitask.config`): `EncoderIntegration`, `EncoderInputType`.
 
 **Utils:** `load_model()`, `get_distribution_strategy()`, `setup_gpu_memory_growth()`, `check_distributed_compatibility()`, `print_device_info()`
 
