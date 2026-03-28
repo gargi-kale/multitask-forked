@@ -485,7 +485,7 @@ class MultiTaskModel(tf.keras.Model):
             y_pred_filtered = {k: y_pred[k] for k in task_names}
             
             # Compute loss using ONLY the matched architectural tasks
-            loss = self.compute_loss(x, y, y_pred_filtered, sample_weight)
+            loss = self._mtl_loss_fn(y, y_pred_filtered)
 
         # Compute gradients and update weights
         gradients = tape.gradient(loss, self.trainable_variables)
@@ -529,7 +529,8 @@ class MultiTaskModel(tf.keras.Model):
         y_pred_filtered = {k: y_pred[k] for k in task_names}
         
         # Compute loss using ONLY the matched architectural tasks
-        self.compute_loss(x, y, y_pred_filtered, sample_weight)
+        loss = self._mtl_loss_fn(y, y_pred_filtered)
+
 
         # Update metrics manually to support masked labels (-1)
         for metric in self.metrics:

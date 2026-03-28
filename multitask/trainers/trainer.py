@@ -201,10 +201,11 @@ class Trainer:
                     y_true_flat = tf.cast(tf.reshape(y_task_true, [-1]), tf.int32)
                     loss_val = tf.reshape(tf.keras.losses.sparse_categorical_crossentropy(
                         y_true_flat, y_task_pred, from_logits=False), [-1])
-                    mask = tf.cast(tf.not_equal(y_true_flat, mask_value), tf.float32)
+                    mask = tf.cast(tf.not_equal(y_true_flat, tf.cast(mask_value, tf.int32)), tf.float32)
                 else:
-                    loss_val = tf.reshape(tf.keras.losses.binary_crossentropy(y_task_true, y_task_pred), [-1])
                     y_true_flat = tf.reshape(y_task_true, [-1])
+                    y_pred_flat = tf.reshape(y_task_pred, [-1])
+                    loss_val = tf.reshape(tf.keras.losses.binary_crossentropy(y_true_flat, y_pred_flat), [-1])
                     mask = tf.cast(tf.not_equal(y_true_flat, mask_value), tf.float32)
                 
                 # Class weighting: skip for regression
@@ -224,7 +225,7 @@ class Trainer:
                         y_task_true, y_task_pred, from_logits=False
                     )
                     num_classes = self.model.config.get_num_classes_per_task(real_idx)
-                    weights_list = [tf.cast(class_weights[real_idx].get(i, 1.0), tf.float32) 
+                    weights_list = [float(class_weights[real_idx].get(i, 1.0))
                                    for i in range(num_classes)]
                     weights_map = tf.constant(weights_list, dtype=tf.float32)
                     
@@ -762,6 +763,8 @@ class Trainer:
             # Compile model with multi-task loss function
             # The loss function internally computes task-specific losses and combines them
             # for joint optimization, implementing the core of multi-task learning
+            self.model._mtl_loss_fn = loss_fn
+            
             self.model.compile(
                 optimizer=optimizer,
                 loss=loss_fn,
