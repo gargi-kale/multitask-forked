@@ -21,7 +21,12 @@ Any TensorFlow Hub model can be used by providing its URL.
 **Example:**
 ```python
 from multitask import MultiTaskModel
-from multitask.config import ModelConfig, EncoderConfig
+from multitask.config import (
+    ModelConfig,
+    EncoderConfig,
+    EncoderInputType,
+    EncoderIntegration,
+)
 
 # BERT from TF Hub
 encoder_config = EncoderConfig(
@@ -370,20 +375,20 @@ config.encoder_config=EncoderConfig(
 )
 model = MultiTaskModel(config=config)
 # BERT-like TF Hub models: EncoderInputType.TFHUB_TOKENS; Universal Sentence Encoder: EncoderInputType.RAW_STRING
-print(model.config.encoder_config.encoder_input_type)
-print(model.config.encoder_config.encoder_integration)  # EncoderIntegration.TFHUB
+print(model.encoder_input_type)
+print(model.encoder_integration)  # EncoderIntegration.TFHUB
 
 config.encoder_config=EncoderConfig(
     encoder=custom_layer,
     encoder_input_type=EncoderInputType.RAW_STRING,  # must match your data
 )
 model = MultiTaskModel(config=config, encoder=custom_layer)
-print(model.config.encoder_config.encoder_input_type)  # EncoderInputType.RAW_STRING
-print(model.config.encoder_config.encoder_integration)  # EncoderIntegration.KERAS
+print(model.encoder_input_type)  # EncoderInputType.RAW_STRING
+print(model.encoder_integration)  # EncoderIntegration.KERAS
 
 model = MultiTaskModel(config=config, embedding_dim=768)
-print(model.config.encoder_config.encoder_input_type)  # None
-print(model.config.encoder_config.encoder_integration)  # None
+print(model.encoder_input_type)  # None
+print(model.encoder_integration)  # None
 ```
 
 ## Troubleshooting
