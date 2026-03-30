@@ -96,8 +96,8 @@ class MultiTaskModel(tf.keras.Model):
     
     def _validate_config(self):
         """Validate model configuration."""
-        if any(x < 2 for x in self.num_classes_per_task):
-            raise ValueError("num_classes_per_task must be at least 2")
+        if any(x < 1 for x in self.num_classes_per_task):
+            raise ValueError("num_classes_per_task must be at least 1")
         if not 0 <= self.dropout_rate < 1:
             raise ValueError("dropout_rate must be in range [0, 1)")
     
@@ -333,6 +333,13 @@ class MultiTaskModel(tf.keras.Model):
                     activation='sigmoid',
                     name=f'{task_name}_output'
                 )
+            elif task_type == 'regression':
+                # Regression: 1 output with linear activation
+                layer = tf.keras.layers.Dense(
+                    output_dim,
+                    activation='linear',
+                    name=f'{task_name}_output'
+                )
             else:
                 raise ValueError(f"Unknown task_type: {task_type}")
             
@@ -478,7 +485,7 @@ class MultiTaskModel(tf.keras.Model):
             y_pred_filtered = {k: y_pred[k] for k in task_names}
             
             # Compute loss using ONLY the matched architectural tasks
-            loss = self.compute_loss(x, y, y_pred_filtered, sample_weight)
+            loss = self._mtl_loss_fn(y, y_pred_filtered)
 
         # Compute gradients and update weights
         gradients = tape.gradient(loss, self.trainable_variables)
@@ -496,7 +503,7 @@ class MultiTaskModel(tf.keras.Model):
             y_true = y[matched_task]
             y_hat = y_pred_filtered[matched_task]
 
-            mask = tf.not_equal(tf.reshape(y_true, [-1]), -1)
+            mask = tf.not_equal(tf.reshape(y_true, [-1]), self.config.mask_value)
             if tf.reduce_any(mask):
                 y_true_masked = tf.boolean_mask(y_true, mask)
                 y_hat_masked  = tf.boolean_mask(y_hat,  mask)
@@ -522,7 +529,8 @@ class MultiTaskModel(tf.keras.Model):
         y_pred_filtered = {k: y_pred[k] for k in task_names}
         
         # Compute loss using ONLY the matched architectural tasks
-        self.compute_loss(x, y, y_pred_filtered, sample_weight)
+        loss = self._mtl_loss_fn(y, y_pred_filtered)
+
 
         # Update metrics manually to support masked labels (-1)
         for metric in self.metrics:
@@ -536,7 +544,7 @@ class MultiTaskModel(tf.keras.Model):
             y_true = y[matched_task]
             y_hat = y_pred_filtered[matched_task]
 
-            mask = tf.not_equal(tf.reshape(y_true, [-1]), -1)
+            mask = tf.not_equal(tf.reshape(y_true, [-1]), self.config.mask_value)
             if tf.reduce_any(mask):
                 y_true_masked = tf.boolean_mask(y_true, mask)
                 y_hat_masked  = tf.boolean_mask(y_hat,  mask)
@@ -996,8 +1004,18 @@ class MultiTaskModel(tf.keras.Model):
                                 f"Expected 0, 1, or -1 (mask)"
                             )
                     
+                    elif task_type == 'regression':
+                        # Regression: [batch_size] or [batch_size, 1], any float value
+                        # Only validate shape, not value range (any float is valid)
+                        if len(labels.shape) == 2 and labels.shape[1] != 1:
+                            raise ValueError(
+                                f"Regression task '{task_name}' has shape {labels.shape}. "
+                                f"Expected [batch_size] or [batch_size, 1]"
+                            )
+                    
                     # Warn if all labels are masked
-                    num_valid = tf.reduce_sum(tf.cast(labels != -1, tf.int32)).numpy()
+                    
+                    num_valid = tf.reduce_sum(tf.cast(labels != self.config.mask_value, tf.int32)).numpy()
                     if num_valid == 0:
                         if verbose:
                             print(f"Warning: All labels are masked (-1) for task '{task_name}'")
@@ -1074,6 +1092,7 @@ class MultiTaskModel(tf.keras.Model):
             'default_layer_sizes': self.config.default_layer_sizes,
             'pooling_strategy': self.config.pooling_strategy,
             'output_pools': self.config.output_pools,
+            'mask_value': self.config.mask_value,
             **self.config.encoder_config.to_dict_for_save(),
         }
         
