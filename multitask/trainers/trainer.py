@@ -1353,7 +1353,7 @@ class Trainer:
         from ..models.persistence import load_model
         
         # Load model (includes weights, config, encoder, AND thresholds if saved)
-        model, thresholds = load_model(filepath, encoder=encoder, custom_objects=custom_objects)
+        model, thresholds = load_model(filepath, encoder=encoder)
         
         # Load training config if available
         training_config_path = os.path.join(filepath, 'training_config.json')
