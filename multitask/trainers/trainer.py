@@ -1270,8 +1270,13 @@ class Trainer:
             >>> trainer, thresholds = Trainer.load_checkpoint(
             ...     'checkpoints/model_v1', load_optimizer=True, compile_model=True)
         """
-        # Use provided thresholds or get from trainer
-        thresholds_to_save = thresholds if thresholds is not None else getattr(self, 'thresholds', None)
+        # Use explicitly provided thresholds first; otherwise prefer thresholds
+        # discovered during fit(), with legacy fallback for checkpoint-loaded trainers.
+        thresholds_to_save = thresholds
+        if thresholds_to_save is None:
+            thresholds_to_save = getattr(self, 'optimal_thresholds', None)
+        if thresholds_to_save is None:
+            thresholds_to_save = getattr(self, 'thresholds', None)
         
         # Save model with thresholds (includes weights, config, encoder, thresholds)
         self.model.save(filepath, save_format=save_format, thresholds=thresholds_to_save)
