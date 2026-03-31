@@ -1,6 +1,6 @@
 # multitask
 
-A flexible multi-task learning library for NLP supporting mixed task types (binary/multiclass/multilabel), multiple encoders, and distributed training.
+A flexible multi-task learning library for NLP supporting mixed task types (binary/multiclass/multilabel/regression), multiple encoders, and distributed training.
 
 ## Table of Contents
 
@@ -19,7 +19,7 @@ A flexible multi-task learning library for NLP supporting mixed task types (bina
 
 ## Features
 
-- Mixed task types in single model (binary, multiclass, multilabel)
+- Mixed task types in single model (binary, multiclass, multilabel, regression)
 - Multiple encoders: TensorFlow Hub, HuggingFace, pre-computed embeddings
 - Automatic class imbalance and task weighting
 - Automatic threshold optimization for binary/multilabel tasks
@@ -107,6 +107,9 @@ encoder_config = EncoderConfig(
     embedding_dim=768
 )
 
+# PRECOMPUTED path: no encoder_identifier is required
+# (inputs are embedding vectors provided directly by your dataset)
+
 config = ModelConfig(
     task_structure=[[1]],
     task_names=['sentiment'],
@@ -118,9 +121,7 @@ config = ModelConfig(
 
 ### Missing Labels
 
-***TODO: Update this after regression changes.***
-
-Use `-1` to mark missing labels (excluded from loss):
+You can set any float as the missing labels. Here we use `-1` to mark missing labels (excluded from loss):
 
 ```python
 data = pd.DataFrame({
@@ -128,6 +129,17 @@ data = pd.DataFrame({
     'task1': [0, 1, -1],     # task1 missing for text3
     'task2': [1, -1, 0],     # task2 missing for text2
 })
+```
+
+```python
+# Optional: use a custom missing-label value globally
+config = ModelConfig(
+    task_structure=[[2]],
+    task_names=['task1', 'task2'],
+    task_types=['binary', 'multiclass'],
+    num_classes_per_task=[2, 3],
+    mask_value=-999.0,
+)
 ```
 
 See [DATA_FORMAT.md](docs/DATA_FORMAT.md) for complete documentation.
@@ -209,19 +221,13 @@ By default, trainer automatically computes:
 - **Task weights**: Inversely proportional to non-masked samples per task
 - **Class weights**: Inversely proportional to class frequency
 
-Override with explicit weights. `class_weights` is one dict **per task**: keys are **class indices** (`0`…`K-1` for multiclass; `0` and `1` for binary and for multilabel columns). `task_weights` is one float per task.
+Override with explicit weights:
 
 ```python
 trainer.fit(
-    train_dataset,
-    val_dataset,
-    num_tasks=3,
-    class_weights=[
-        {0: 1.0, 1: 1.2, 2: 0.8},           # e.g. 3-class sentiment
-        {0: 1.0, 1: 2.0},                   # binary toxicity
-        {0: 1.0, 1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0},  # e.g. 5-class
-    ],
-    task_weights=[1.0, 2.0, 1.0],
+    train_data, val_data,
+    class_weights=[{0: 1.0, 1: 2.0}, ...],  # Per task
+    task_weights=[1.0, 2.0, ...],
 )
 ```
 

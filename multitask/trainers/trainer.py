@@ -44,7 +44,7 @@ class Trainer:
     Example:
         >>> config = TrainingConfig(epochs=20, batch_size=32, learning_rate=3e-4)
         >>> trainer = Trainer(model, config)
-        >>> history = trainer.fit(train_dataset, val_dataset, num_tasks=10)
+        >>> history, _ = trainer.fit(train_dataset, val_dataset, num_tasks=10)
         >>> # With threshold optimization:
         >>> history, thresholds = trainer.fit(train_dataset, val_dataset, 
         ...                                    num_tasks=10, optimize_thresholds=True)
@@ -63,6 +63,7 @@ class Trainer:
         self.strategy = strategy or tf.distribute.get_strategy()
         self.custom_loss_fn = loss_fn
         self.custom_optimizer = optimizer
+        # Missing-label masking follows ModelConfig.mask_value (not TrainingConfig.mask_value).
         self.mask_value = self.model.config.mask_value
         
         # Will be set during training
@@ -432,7 +433,7 @@ class Trainer:
         y_true_dict: Dict[str, np.ndarray],
         y_pred_dict: Dict[str, np.ndarray],
         mask_value: Optional[float] = None
-    ) -> Tuple[Dict[str, float], Dict[str, float]]:
+    ) -> Tuple[Dict[str, float], Dict[str, float]] | None:
         """Find optimal classification thresholds using validation data.
         
         Uses Youden's J statistic (max sensitivity + specificity) to find
@@ -449,7 +450,7 @@ class Trainer:
             
         Returns:
             Tuple of (thresholds_dict, f1_scores_dict)
-            where name -> float for outputs with thresholds, None for multiclass
+            where name -> float for outputs with thresholds, None for multiclass/regression
         """
         thresholds = {}
         f1_scores = {}
@@ -897,7 +898,7 @@ class Trainer:
     def evaluate(
         self,
         dataset: tf.data.Dataset,
-        thresholds: Optional[Dict[str, float]] = None,
+        thresholds: Optional[Dict[str, Optional[float]]] = None,
         metrics: Optional[List[str]] = None,
         mask_value: Optional[float] = None
     ) -> Dict[str, Any]:
@@ -916,7 +917,8 @@ class Trainer:
         
         Args:
             dataset: TensorFlow Dataset to evaluate on (yields (inputs, labels_dict))
-            thresholds: Optional dict of thresholds per task {task_name: threshold_value}
+            thresholds: Optional dict of thresholds per output name (tasks and pools).
+                       Values may be float or None (e.g. multiclass/regression).
                        If None, will use self.optimal_thresholds if available
             metrics: List of metric names to compute. Options:
                      Binary metrics (require thresholds): 'accuracy', 'precision', 'recall', 'f1'
@@ -1253,8 +1255,11 @@ class Trainer:
         
         Args:
             filepath: Directory path to save checkpoint
-            thresholds: Optional dict of task_name -> threshold values.
-                       If None, uses self.thresholds if available.
+            thresholds: Optional dict of task_name -> threshold values. 
+                        If None, uses self.optimal_thresholds, then 
+                        self.thresholds if available. optimal_thresholds is 
+                        populated from fit() while thresholds is set in load_checkpoint
+                        (i.e. passed explicitly).
             save_format: Format to save weights ('tf' or 'h5')
             save_optimizer: Whether to save optimizer state for training resumption.
                           Use False for deployment-only to save space (~2x reduction).

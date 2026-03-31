@@ -39,7 +39,8 @@ history, thresholds = trainer.fit(train_ds, val_ds, num_tasks=5)
 
 # Evaluate: pool metrics reported separately
 results = trainer.evaluate(test_ds)
-# results["pool_metrics"]["any_technique"] = {"f1": ..., "auc": ...}
+# results["pool_metrics"]["any_technique"] contains metrics appropriate to
+# the pool task_type and the metrics requested in evaluate(...)
 
 # Inference
 outputs = model.predict(test_ds)
@@ -107,7 +108,7 @@ Pools do not affect training. The custom `train_step` and `test_step` filter poo
 
 ### Ground-Truth Labels (trainer.py)
 The dataset never contains pool labels. During threshold optimization and evaluation, `_derive_pooled_labels()` derives them from the task labels:
-- Masked labels (`-1`) are excluded via NaN replacement
+- Masked labels (`ModelConfig.mask_value`, default `-1.0`) are excluded via NaN replacement
 - If all constituents are masked for an observation, the pooled label is masked
 - The strategy (max/mean/min) is applied over non-masked constituents
 

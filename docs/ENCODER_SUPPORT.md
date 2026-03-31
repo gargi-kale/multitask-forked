@@ -54,7 +54,7 @@ config = ModelConfig(
 ```
 
 **Advantages:**
-- No extra dependencies (TensorFlow Hub comes with the library)
+- Simple setup once `tensorflow-hub` is installed (included in this project's requirements)
 - Optimized for TensorFlow
 - Easy to use
 
@@ -139,32 +139,62 @@ model = MultiTaskModel(
 
 ### 3. Custom Keras Layers
 
-Pass any custom Keras layer as the encoder.
+Pass any custom Keras layer as the encoder. Set `encoder_input_type` to match what your dataset provides (same contract as built-in encoders).
 
-**Example:**
+**Example 1 (minimal `Dense` encoder):** a tiny custom layer with a single `Dense` stack. Inputs are still **float** embedding rows `[batch, dim]` (here `dim` should match what you pass as `embedding_dim`, e.g. 768), not raw strings.
+
+Do **not** pair `EncoderInputType.RAW_STRING` with a layer that only accepts numeric tensors (e.g. `Dense` on `tf.string`). For raw text, use `RAW_STRING` only if your layer accepts string tensors and returns floats.
+
 ```python
 import tensorflow as tf
 from multitask import MultiTaskModel
-from multitask.config import ModelConfig, EncoderConfig, EncoderInputType
+from multitask.config import ModelConfig, EncoderConfig, EncoderInputType, EncoderIntegration
 
-# Custom encoder
 class MyEncoder(tf.keras.layers.Layer):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.dense = tf.keras.layers.Dense(768, activation='relu')
-    
+        self.dense = tf.keras.layers.Dense(768, activation="relu")
+
     def call(self, inputs):
         return self.dense(inputs)
 
-# Use custom encoder (set encoder_input_type to match your dataset; Keras layers are built as EncoderIntegration.KERAS)
 config = ModelConfig(
     task_structure=[[2]],
     encoder_config=EncoderConfig(
         encoder=MyEncoder(),
         encoder_input_type=EncoderInputType.PRECOMPUTED,
+        encoder_integration=EncoderIntegration.KERAS,
     ),
 )
-model = MultiTaskModel(config=config)
+model = MultiTaskModel(config=config, embedding_dim=768)
+```
+
+**Example 2 (trainable projection layer):** same setup, but with a named projector class that you can customize (dim, activation, additional layers, etc.).
+
+```python
+import tensorflow as tf
+from multitask import MultiTaskModel
+from multitask.config import ModelConfig, EncoderConfig, EncoderInputType, EncoderIntegration
+
+class EmbeddingProjector(tf.keras.layers.Layer):
+    """Maps external embedding vectors (e.g. 768-d) to another representation size."""
+
+    def __init__(self, dim: int = 768, **kwargs):
+        super().__init__(**kwargs)
+        self.proj = tf.keras.layers.Dense(dim, activation="relu")
+
+    def call(self, inputs):
+        return self.proj(inputs)
+
+config = ModelConfig(
+    task_structure=[[2]],
+    encoder_config=EncoderConfig(
+        encoder=EmbeddingProjector(768),
+        encoder_input_type=EncoderInputType.PRECOMPUTED,
+        encoder_integration=EncoderIntegration.KERAS,
+    ),
+)
+model = MultiTaskModel(config=config, embedding_dim=768)
 ```
 
 ### 4. API Encoders
@@ -367,28 +397,52 @@ model = MultiTaskModel(
 
 ## Model Detection
 
-The library automatically detects encoder type:
+The library infers integration from identifiers (for example TF Hub URLs and `integration:model` strings) or uses an explicit `EncoderConfig`. Use **separate** `ModelConfig` instances below so examples do not overwrite each other.
 
 ```python
-config.encoder_config=EncoderConfig(
-    encoder_identifier="https://tfhub.dev/..."
-)
-model = MultiTaskModel(config=config)
-# BERT-like TF Hub models: EncoderInputType.TFHUB_TOKENS; Universal Sentence Encoder: EncoderInputType.RAW_STRING
-print(model.encoder_input_type)
-print(model.encoder_integration)  # EncoderIntegration.TFHUB
+from multitask import MultiTaskModel, ModelConfig
+from multitask.config import EncoderConfig, EncoderInputType, EncoderIntegration
+import tensorflow as tf
 
-config.encoder_config=EncoderConfig(
-    encoder=custom_layer,
-    encoder_input_type=EncoderInputType.RAW_STRING,  # must match your data
+# 1) TF Hub (identifier sets integration; input type follows model family)
+tfhub_config = ModelConfig(
+    task_structure=[[2]],
+    encoder_config=EncoderConfig(
+        encoder_identifier="https://tfhub.dev/google/universal-sentence-encoder/4",
+    ),
 )
-model = MultiTaskModel(config=config, encoder=custom_layer)
-print(model.encoder_input_type)  # EncoderInputType.RAW_STRING
-print(model.encoder_integration)  # EncoderIntegration.KERAS
+model_tfhub = MultiTaskModel(config=tfhub_config)
 
-model = MultiTaskModel(config=config, embedding_dim=768)
-print(model.encoder_input_type)  # None
-print(model.encoder_integration)  # None
+# Universal Sentence Encoder → RAW_STRING; BERT-style TF Hub URLs → TFHUB_TOKENS
+print(model_tfhub.encoder_input_type)
+print(model_tfhub.encoder_integration)  # EncoderIntegration.TFHUB
+
+# 2) Custom Keras layer as encoder (integration is KERAS; input type must match your data)
+class Passthrough(tf.keras.layers.Layer):
+    def call(self, inputs):
+        return inputs
+
+custom_config = ModelConfig(
+    task_structure=[[2]],
+    encoder_config=EncoderConfig(
+        encoder=Passthrough(),
+        encoder_input_type=EncoderInputType.PRECOMPUTED,
+        encoder_integration=EncoderIntegration.KERAS,
+    ),
+)
+model_custom = MultiTaskModel(config=custom_config, embedding_dim=768)
+print(model_custom.encoder_input_type)  # EncoderInputType.PRECOMPUTED
+print(model_custom.encoder_integration)  # EncoderIntegration.KERAS
+
+# 3) Pre-computed embeddings only (no encoder; embeddings fed directly to shared/branch layers)
+embed_config = ModelConfig(
+    task_structure=[[2]],
+    encoder_config=EncoderConfig(embedding_dim=768),
+)
+model_embed = MultiTaskModel(config=embed_config, embedding_dim=768)
+print(model_embed.uses_encoder)  # False
+print(model_embed.encoder_input_type)  # None
+print(model_embed.encoder_integration)  # None
 ```
 
 ## Troubleshooting

@@ -8,16 +8,18 @@ Save and load multi-task models with optimized thresholds and training state.
 
 ```python
 from multitask import Trainer, TrainingConfig, ModelConfig, MultiTaskModel, EncoderConfig
+from multitask.config import EncoderIntegration, EncoderInputType
 
 # Train model
 encoder_config = EncoderConfig(
     encoder_identifier="bert-base-uncased",
     encoder_input_type=EncoderInputType.HUGGINGFACE_TOKENS,
-    encoder_integration=EncoderIntegration.HUGGINGFACE
+    encoder_integration=EncoderIntegration.HUGGINGFACE,
 )
 config = ModelConfig(
-    ...
-    encoder_config=encoder_config
+    task_structure=[[10]],
+    task_names=[f"task_{i}" for i in range(10)],
+    encoder_config=encoder_config,
 )
 model = MultiTaskModel(config)
 trainer = Trainer(model, TrainingConfig())
@@ -92,15 +94,18 @@ history, new_thresholds = trainer.fit(train_ds, val_ds, num_tasks=10)
 ### Pattern 1: Simple Model Save (Deployment)
 
 ```python
+from multitask import load_model, Trainer, TrainingConfig
+
 # After training
 history, thresholds = trainer.fit(train_ds, val_ds, optimize_thresholds=True)
 
 # Save just the model
 model.save('deploy/model', thresholds=thresholds)
 
-# Later, load for inference
+# Later, load for inference (construct a Trainer around the loaded model)
 model, thresholds = load_model('deploy/model')
-results = trainer.evaluate(test_ds, thresholds=thresholds)
+eval_trainer = Trainer(model, TrainingConfig())
+results = eval_trainer.evaluate(test_ds, thresholds=thresholds)
 ```
 
 **File structure**: Small, contains only what's needed for inference.
@@ -161,8 +166,9 @@ Saves model to directory with optional thresholds.
 - `filepath`: Directory path to save model artifacts
 - `save_format`: Format to save weights ('tf' or 'h5')
 - `thresholds`: Optional dict of task_name -> threshold values for classification.
-                Essential for binary/multilabel tasks. If None, thresholds must be
-                provided during inference via evaluate() or predict().
+                Useful for binary/multilabel deployment. If None, thresholds can
+                still be passed later to `Trainer.evaluate(...)`, or loaded from
+                `thresholds.json` when available.
 
 **Files created**:
 ```

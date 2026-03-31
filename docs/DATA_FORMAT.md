@@ -289,8 +289,7 @@ Labels must be provided as a **dictionary** mapping task names to label tensors.
 
 ### Binary Classification (`task_type='binary'`)
 
-***TODO: Update this after regression support***
-**Format**: Single value per sample (0 or 1), or -1 for masked/missing labels 
+**Format**: Single value per sample (0 or 1), or `mask_value` for masked/missing labels 
 
 ```python
 # Option 1: Shape [batch_size]
@@ -304,13 +303,13 @@ labels_dict = {
 }
 ```
 
-**Valid values**: `0`, `1`, `-1` (mask)
+**Valid values**: `0`, `1`, or your configured `mask_value`
 
 **Output**: Model returns probabilities in [0, 1] via sigmoid activation
 
 ### Multiclass Classification (`task_type='multiclass'`)
 
-**Format**: Class index per sample (0 to K-1), or -1 for masked
+**Format**: Class index per sample (0 to K-1), or `mask_value` for masked
 
 ```python
 # For 3 classes (e.g., negative=0, neutral=1, positive=2)
@@ -320,13 +319,13 @@ labels_dict = {
 # Shape: [batch_size]
 ```
 
-**Valid values**: `0` to `K-1` where K = `num_classes_per_task[i]`, or `-1` (mask)
+**Valid values**: `0` to `K-1` where K = `num_classes_per_task[i]`, or `mask_value`
 
 **Output**: Model returns class probabilities via softmax activation
 
 ### Multilabel Classification (`task_type='multilabel'`)
 
-**Format**: Binary indicator for each class (0 or 1), or -1 for masked
+**Format**: Binary indicator for each class (0 or 1), or `mask_value` for masked
 
 ```python
 # For 4 possible labels (e.g., categories: politics, sports, tech, business)
@@ -341,15 +340,35 @@ labels_dict = {
 # Shape: [batch_size, num_classes]
 ```
 
-**Valid values**: `0`, `1`, `-1` (mask) for each class
+**Valid values**: `0`, `1`, or `mask_value` for each class
 
 **Output**: Model returns per-class probabilities via sigmoid activation
 
+**Trainer caveat:** threshold optimization and some classification metrics paths in `Trainer` use the **first column only** when predictions or labels are 2D (`[:, 0]`). For full multi-label training/evaluation per class, confirm your workflow matches that behavior or use per-class tasks.
+
+### Regression (`task_type='regression'`)
+
+**Format**: Single float target per sample, or `mask_value` for masked/missing labels.
+
+```python
+# Option 1: Shape [batch_size]
+labels_dict = {
+    'score': tf.constant([0.32, -0.75, -1.0, 0.91], dtype=tf.float32)  # 3rd sample masked
+}
+
+# Option 2: Shape [batch_size, 1]
+labels_dict = {
+    'score': tf.constant([[0.32], [-0.75], [-1.0], [0.91]], dtype=tf.float32)
+}
+```
+
+**Output**: Model returns one value per sample with linear activation.
+
 ### Label Masking
 
-***TODO: Update this after regression support***
-
-Use `-1` to indicate missing, invalid, or unlabeled data. Masked labels are:
+`mask_value` indicates missing, invalid, or unlabeled data (default: `-1.0`).
+Configure it in `ModelConfig(mask_value=...)`, then use the same value in all label columns/tensors.
+Masked labels are:
 - **Excluded from loss computation** (don't contribute to training)
 - **Excluded from metrics** (don't affect accuracy, F1, etc.)
 - **Useful for**: Partially labeled data, different tasks available for different samples
@@ -358,22 +377,36 @@ Use `-1` to indicate missing, invalid, or unlabeled data. Masked labels are:
 labels_dict = {
     'task_0': tf.constant([1, 0, -1, 1], dtype=tf.float32),    # Binary: 3rd sample masked
     'task_1': tf.constant([2, -1, 1, 0], dtype=tf.int32),       # Multiclass: 2nd sample masked
-    'task_2': tf.constant([[1, 0, 1], [-1, -1, -1], [0, 1, 0], [1, 1, 1]], dtype=tf.float32)  # Multilabel: 2nd sample masked
+    'task_2': tf.constant([[1, 0, 1], [-1, -1, -1], [0, 1, 0], [1, 1, 1]], dtype=tf.float32),  # Multilabel: 2nd sample masked
+    'task_3': tf.constant([0.5, -1.0, -0.2, 0.9], dtype=tf.float32),  # Regression: 2nd sample masked
 }
+```
+
+```python
+# Example: custom missing-label value instead of -1
+config = ModelConfig(
+    task_structure=[[4]],
+    task_types=['binary', 'multiclass', 'multilabel', 'regression'],
+    # Per task: binary(2), multiclass(K>=3), multilabel(num labels), regression(1)
+    num_classes_per_task=[2, 5, 4, 1],
+    mask_value=-999.0,
+)
 ```
 
 ## Model Output Format
 
 ### Dictionary Outputs
 
-The model returns predictions as a **dictionary** mapping task names to output tensors:
+The model returns predictions as a **dictionary** mapping output names to tensors:
 
 ```python
 outputs = model(inputs)
 # Returns: {
 #     'task_0': tf.Tensor(shape=[batch_size, 1], dtype=float32),      # Binary
 #     'task_1': tf.Tensor(shape=[batch_size, num_classes], dtype=float32),  # Multiclass
-#     'task_2': tf.Tensor(shape=[batch_size, num_classes], dtype=float32)   # Multilabel
+#     'task_2': tf.Tensor(shape=[batch_size, num_classes], dtype=float32),   # Multilabel
+#     'task_3': tf.Tensor(shape=[batch_size, 1], dtype=float32),             # Regression
+#     # Optional pooled outputs appear here too when output_pools is configured
 # }
 ```
 
@@ -395,6 +428,8 @@ concatenated_tensor, task_indices = model.flatten_outputs(outputs)
 outputs_dict = model.unflatten_outputs(concatenated_tensor)
 # Returns: {'task_0': ..., 'task_1': ..., 'task_2': ...}
 ```
+
+**Pools:** `flatten_outputs` concatenates **all keys** present in the dict (tasks and pool outputs when included). `unflatten_outputs` only slices **architectural task** widths in order, then **recomputes** pools from those tasks. For a true round-trip on tensors, flatten **task outputs only** (exclude pool keys), or accept that pool entries are reconstructed rather than restored from the flat tensor.
 
 ## Preprocessing Examples
 
@@ -602,14 +637,16 @@ import tensorflow as tf
 def create_partially_labeled_dataset(texts, task1_labels, task2_labels):
     """Some samples only have labels for task1, some for task2, some for both."""
     
+    mask_value = -999.0  # should match ModelConfig(mask_value=...)
+
     def preprocess(text, label1, label2):
         # Convert text to BERT inputs (pseudo-code)
         inputs = tokenize_text(text)
         
-        # Use -1 to mask unavailable labels
+        # Use mask_value to mask unavailable labels
         labels_dict = {
-            'task_1': tf.where(tf.math.is_nan(label1), -1.0, label1),  # Mask NaN
-            'task_2': tf.where(tf.math.is_nan(label2), -1.0, label2)
+            'task_1': tf.where(tf.math.is_nan(label1), mask_value, label1),  # Mask NaN
+            'task_2': tf.where(tf.math.is_nan(label2), mask_value, label2)
         }
         
         return inputs, labels_dict
@@ -759,7 +796,7 @@ dataset = tf.data.Dataset.from_generator(...).batch(32)
 
 ❌ **Wrong**: Using values outside valid range
 ```python
-# Binary task with values outside {0, 1, -1}
+# Binary task with values outside {0, 1, mask_value}
 labels_dict = {'binary': tf.constant([0.5, 2, -2], dtype=tf.float32)}  # Wrong!
 
 # Multiclass task with out-of-range indices
@@ -768,10 +805,10 @@ labels_dict = {'multiclass': tf.constant([5, -2], dtype=tf.int32)}  # Wrong if o
 
 ✅ **Correct**: Using valid values
 ```python
-# Binary: 0, 1, or -1
+# Binary: 0, 1, or mask_value
 labels_dict = {'binary': tf.constant([0, 1, -1], dtype=tf.float32)}
 
-# Multiclass with 3 classes: 0, 1, 2, or -1
+# Multiclass with 3 classes: 0, 1, 2, or mask_value
 labels_dict = {'multiclass': tf.constant([2, 0, -1], dtype=tf.int32)}
 ```
 
@@ -897,9 +934,9 @@ Before training, verify:
   - Multiclass: `[batch]`
   - Multilabel: `[batch, num_classes]`
 - [ ] Label values are valid:
-  - Binary: `{0, 1, -1}`
-  - Multiclass: `{0..K-1, -1}`
-  - Multilabel: `{0, 1, -1}` per class
+  - Binary: `{0, 1, mask_value}`
+  - Multiclass: `{0..K-1, mask_value}`
+  - Multilabel: `{0, 1, mask_value}` per class
 - [ ] Label dtypes are correct (float32 for binary/multilabel, int32 for multiclass)
 - [ ] Dataset is batched with `.batch(batch_size)`
 - [ ] Used `model.validate_dataset()` to verify format

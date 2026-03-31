@@ -5,21 +5,47 @@ This guide covers distributed training with the multitask library, including cro
 ## Quick Start
 
 ```python
+import tensorflow as tf
 from multitask import (
     ModelConfig, TrainingConfig, MultiTaskModel, Trainer,
-    get_distribution_strategy, setup_gpu_memory_growth
+    get_distribution_strategy, setup_gpu_memory_growth,
 )
+from multitask.config import EncoderConfig, EncoderIntegration, EncoderInputType
 
-# Setup: enable memory growth and get optimal strategy
 setup_gpu_memory_growth()
 strategy, info = get_distribution_strategy('auto', verbose=True)
 
-# Create model and trainer within strategy scope
+training_config = TrainingConfig(batch_size=32, epochs=2)
+encoder_config = EncoderConfig(
+    encoder_identifier="https://tfhub.dev/google/universal-sentence-encoder/4",
+    encoder_input_type=EncoderInputType.RAW_STRING,
+    encoder_integration=EncoderIntegration.TFHUB,
+    trainable_encoder=False,
+)
+model_config = ModelConfig(
+    task_structure=[[2]],
+    task_names=["task_0", "task_1"],
+    task_types=["binary", "binary"],
+    num_classes_per_task=[2, 2],
+    encoder_config=encoder_config,
+)
+
+# Replace with your real tf.data pipelines that yield (inputs, labels_dict)
+def _example_dataset():
+    texts = tf.constant(["example one", "example two"], dtype=tf.string)
+    labels_dict = {
+        "task_0": tf.constant([0.0, 1.0]),
+        "task_1": tf.constant([1.0, 0.0]),
+    }
+    return tf.data.Dataset.from_tensor_slices((texts, labels_dict)).batch(2)
+
+train_dataset = _example_dataset()
+val_dataset = _example_dataset()
+
 with strategy.scope():
     model = MultiTaskModel(model_config)
     trainer = Trainer(model, training_config, strategy=strategy)
 
-# Train - distribution handled automatically
 history, thresholds = trainer.fit(train_dataset, val_dataset, num_tasks=2)
 ```
 

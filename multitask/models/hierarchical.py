@@ -31,11 +31,9 @@ class MultiTaskModel(tf.keras.Model):
     
     Args:
         config: ModelConfig object defining the architecture
-        encoder: Optional encoder - TensorFlow Hub URL (https://tfhub.dev/...),
-                 HuggingFace model name (e.g., 'bert-base-uncased'), or custom Keras layer
         embedding_dim: If using embeddings, their dimension
         num_classes_per_task: Number of classes per task (default: 2 for binary)
-        dropout: Dropout rate (overrides config if provided)
+        dropout_rate: Dropout rate (overrides config if provided)
         name: Optional model name
     
     Example:
@@ -397,7 +395,7 @@ class MultiTaskModel(tf.keras.Model):
         self, 
         inputs: Union[tf.Tensor, Dict[str, tf.Tensor]], 
         training: Optional[bool] = None
-    ) -> tf.Tensor:
+    ) -> Dict[str, tf.Tensor]:
         """Forward pass through the hierarchical model.
         
         Args:
@@ -406,7 +404,7 @@ class MultiTaskModel(tf.keras.Model):
             training: Whether in training mode
             
         Returns:
-            Concatenated predictions for all tasks, shape [batch_size, num_outputs]
+            Dictionary mapping task names to outputs (tasks + optional pools)
         """
         # Encode input
         x = self._encode_input(inputs, training=training)
@@ -491,7 +489,7 @@ class MultiTaskModel(tf.keras.Model):
         gradients = tape.gradient(loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
 
-        # Update metrics manually to support masked labels (-1)
+        # Update metrics manually to support masked labels (ModelConfig.mask_value)
         for metric in self.metrics:
             if metric.name == 'loss' or metric.name.endswith('_loss'):
                 continue
@@ -532,7 +530,7 @@ class MultiTaskModel(tf.keras.Model):
         loss = self._mtl_loss_fn(y, y_pred_filtered)
 
 
-        # Update metrics manually to support masked labels (-1)
+        # Update metrics manually to support masked labels (ModelConfig.mask_value)
         for metric in self.metrics:
             if metric.name == 'loss' or metric.name.endswith('_loss'):
                 continue
@@ -582,7 +580,7 @@ class MultiTaskModel(tf.keras.Model):
         lines.append("=" * 50)
         
         if self.uses_encoder:
-            lines.append("Encoder: TensorFlow Hub Layer")
+            lines.append(f"Encoder: {self.encoder_type or 'keras'} ({self.encoder_integration})")
         else:
             lines.append(f"Input: Pre-computed Embeddings (dim={self.embedding_dim})")
         
@@ -748,7 +746,8 @@ class MultiTaskModel(tf.keras.Model):
         Returns:
             Tuple of:
                 - concatenated_tensor: [batch_size, total_output_dims]
-                - task_indices: Dict mapping task_name -> (start_col, end_col) in tensor
+                - task_indices: Dict mapping each key in ``output_dict`` (task or pool name)
+                  to ``(start_col, end_col)`` in the concatenated tensor
                 
         Example:
             >>> predictions = model.predict(data)  # Returns dict
@@ -776,8 +775,10 @@ class MultiTaskModel(tf.keras.Model):
     ) -> Dict[str, tf.Tensor]:
         """Convert concatenated tensor back to dictionary format.
         
-        Reverse of flatten_outputs. Useful after processing with external tools.
-        Handles both architectural task outputs and pooled outputs.
+        Reconstructs **architectural task** columns from left to right in ``task_names`` order,
+        then **recomputes** pooled outputs via ``_compute_pooled_outputs``. It is not a strict
+        inverse of :meth:`flatten_outputs` when ``output_dict`` also contained pool keys:
+        use :meth:`flatten_outputs` only on task keys (or expect pools to be derived again here).
         
         Args:
             concatenated_tensor: Tensor output shape [batch_size, total_output_dims]

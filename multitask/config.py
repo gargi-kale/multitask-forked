@@ -43,7 +43,7 @@ class EncoderIntegration(str, Enum):
     HUGGINGFACE_API = "huggingface_api"
     SENTENCE_TRANSFORMERS = "sentence_transformers"
 
-    # TODO: Add support if needed
+    # Add more as needed
     # Cloud platforms that host multiple model types
     # GOOGLE_VERTEX = "google_vertex"
     # AZURE = "azure"
@@ -54,8 +54,6 @@ class EncoderIntegration(str, Enum):
     # FASTTEXT = "fasttext"
     # SPACY = "spacy"
     # GENSIM = "gensim"
-
-    # Add more as needed
 
 class EncoderInputType(str, Enum):
     """What input format the encoder expects."""
@@ -176,7 +174,11 @@ class EncoderConfig:
 
 @dataclass
 class TrainingConfig:
-    """Default configuration for training multi-task models."""
+    """Default configuration for training multi-task models.
+    
+    Missing-label masking during training/evaluation follows ``ModelConfig.mask_value`` on the
+    model, not ``TrainingConfig.mask_value`` (kept for symmetry / future use).
+    """
     
     # Training hyperparameters
     epochs: int = 20
@@ -200,7 +202,7 @@ class TrainingConfig:
     early_stopping_min_delta: float = 0.001
     
     # Optimizer settings
-    optimizer_type: str = 'adam'  # 'adamw', 'adam', 'sgd'
+    optimizer_type: str = 'adam'  # 'adamw', 'adam', 'sgd', 'nadam'
     
     # optimizer hyperparameters
     optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
@@ -210,8 +212,8 @@ class TrainingConfig:
     lr_schedule_type: str = 'polynomial_decay'  # 'polynomial_decay', 'exponential_decay', 'cosine_decay', 'constant'
     use_warmup: bool = True
     
-    # mask value for missing values. Default -1
-    # change if -1 is a valid regression target in the data
+    # mask value for missing labels (symmetry with ModelConfig). Trainer masking uses
+    # ModelConfig.mask_value only; this field is not read by Trainer today.
     mask_value: float = -1.0
     
     def __post_init__(self):
@@ -310,7 +312,7 @@ class ModelConfig:
     # These correspond to the final level outputs in order
     task_names: Optional[List[str]] = None
     
-    # Task types: 'binary', 'multiclass', or 'multilabel'
+    # Task types: 'binary', 'multiclass', 'multilabel', or 'regression'
     # If provided, must be a flat list with length equal to total_tasks (final level outputs)
     # Defaults to 'binary' for all tasks if not provided
     task_types: Optional[List[str]] = None
@@ -710,20 +712,27 @@ class ModelConfig:
             task_idx: The task index (0-indexed)
             
         Returns:
-            Task type: 'binary', 'multiclass', or 'multilabel'
+            Task type: 'binary', 'multiclass', 'multilabel', or 'regression'
         """
         if self.task_types is None:
             return 'binary'
         return self.task_types[task_idx]
     
     def get_num_classes_per_task(self, task_idx: int) -> int:
-        """Get the number of classes for a specific task.
+        """
+        Get the number of classes for a specific task. 
+        - For binary and multiclass, this returns the number of classes. 
+        - For multilabel, this returns the number of labels
+        - For regression, this is not really meaningful, and the scalar output 
+          is handled elsewhere.
         
         Args:
             task_idx: The task index (0-indexed)
             
         Returns:
-            Number of classes (2 for binary, K for multiclass)
+            For binary: typically 2; multiclass: K; multilabel: number of labels;
+            regression: stored value (often 1) — output width is handled in ``get_output_dim_for_task``.
+            
         """
         if self.num_classes_per_task is None:
             return 2  # Default to binary

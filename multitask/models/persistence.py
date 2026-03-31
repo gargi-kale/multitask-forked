@@ -67,7 +67,7 @@ def load_model(
     Returns:
         Tuple of (model, thresholds_dict or None)
         - model: Loaded MultiTaskModel ready for inference/training
-        - thresholds: Dict mapping task_name -> float threshold, or None if not saved
+        - thresholds: Dict mapping output name -> threshold (float or None), or None if not saved
         
     Raises:
         ValueError: If saved files are missing or invalid
