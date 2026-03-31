@@ -1,12 +1,12 @@
 # Output Pools
 
-Aggregate predictions across related tasks without additional training cost.
+Aggregate predictions across related tasks with no additional loss terms or trainable parameters.
 
 ## What Are Output Pools?
 
 An output pool combines predictions from multiple tasks into a single derived output.
 
-Pools are computed during the forward pass but have no trainable parameters and no loss term. The model trains on individual tasks exactly as before.
+Pools are computed during the forward pass but have no trainable parameters and no loss term. The model trains on individual tasks exactly as before (with only a small extra forward-pass compute cost for deriving pooled outputs).
 
 ## Quick Start
 ```python
@@ -39,7 +39,8 @@ history, thresholds = trainer.fit(train_ds, val_ds, num_tasks=5)
 
 # Evaluate: pool metrics reported separately
 results = trainer.evaluate(test_ds)
-# results["pool_metrics"]["any_technique"] = {"f1": ..., "auc": ...}
+# results["pool_metrics"]["any_technique"] contains metrics appropriate to
+# the pool task_type and the metrics requested in evaluate(...)
 
 # Inference
 outputs = model.predict(test_ds)
@@ -87,6 +88,9 @@ output_pools={
 - A task appears in more than one pool
 - A pool has fewer than 2 tasks
 - Strategy is not one of `max`, `mean`, `min`
+- A referenced task is a regression task (regression cannot be pooled)
+- Optional `task_type` is invalid (must be `binary`, `multiclass`, or `multilabel`)
+- Optional `num_classes` is invalid or inconsistent with `task_type`
 
 ## How it Works
 
@@ -104,7 +108,7 @@ Pools do not affect training. The custom `train_step` and `test_step` filter poo
 
 ### Ground-Truth Labels (trainer.py)
 The dataset never contains pool labels. During threshold optimization and evaluation, `_derive_pooled_labels()` derives them from the task labels:
-- Masked labels (`-1`) are excluded via NaN replacement
+- Masked labels (`ModelConfig.mask_value`, default `-1.0`) are excluded via NaN replacement
 - If all constituents are masked for an observation, the pooled label is masked
 - The strategy (max/mean/min) is applied over non-masked constituents
 
@@ -126,7 +130,7 @@ Pool metrics are excluded from `overall_metrics` to prevent the averages from sh
 
 Pool configuration is persisted automatically:
 - `config.json` includes the `output_pools` dictionary
-- `thresholds.json` includes pool thresholds alongside task thresholds
+- `thresholds.json` includes pool thresholds alongside task thresholds (when thresholds are saved)
 - On load, the reconstructed model produces pooled outputs immediately
 
 ```python
@@ -135,7 +139,7 @@ model.save("my_model", thresholds=thresholds)
 from multitask.models.persistence import load_model
 loaded_model, loaded_thresholds = load_model("my_model")
 # loaded_model.config.has_pools → True
-# loaded_thresholds includes pool thresholds
+# loaded_thresholds includes pool thresholds (if thresholds were saved)
 ```
 
 ## Helper Methods

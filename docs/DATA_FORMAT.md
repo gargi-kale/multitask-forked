@@ -18,6 +18,10 @@ The `multitask` library uses TensorFlow `tf.data.Dataset` objects for training a
 - **inputs**: Text input (format depends on encoder type)
 - **labels_dict**: Dictionary mapping task names to label tensors
 
+`inputs` are passed into `MultiTaskModel` on the forward pass, which then forwards it to the encoder. 
+
+Note that API encoders do not require these as the remote service owns tokenization and the model. API encoders are also not trainable for the same reason.
+
 ## Dataset Format
 
 ### Basic Structure
@@ -58,7 +62,7 @@ dataset = tf.data.Dataset.from_generator(
 
 ## Input Formats
 
-The input format depends on whether you're using a text encoder or pre-computed embeddings.
+The input format depends on whether you're using a text encoder, API encoder, or pre-computed embeddings.
 
 ### Format 1: Text Encoder Input
 
@@ -124,7 +128,73 @@ inputs = tokenizer(
 # Returns dict with input_ids, attention_mask, token_type_ids
 ```
 
-### Format 2: Pre-computed Embedding Input
+### Format 2: API Encoder Input
+
+When using API-based encoders (e.g. OpenAI, Cohere, Voyage, or HuggingFace Inference), inputs should be raw string tensors.
+
+You **do not** pass token dictionaries for API encoders.
+
+**How It Works**
+
+1. ** Create model with an API encoder**
+```python
+from multitask import MultiTaskModel
+from multitask.config import ModelConfig, EncoderConfig
+
+config = ModelConfig(
+    task_structure=[[2]],
+    task_names=['task_0', 'task_1'],
+    encoder_config=EncoderConfig(
+        encoder_identifier='openai:text-embedding-3-small' # example API model
+    )
+)
+
+model = MultiTaskModel(config=config)
+```
+
+2. **Dataset yields raw text + labels**
+```python
+import tensorflow as tf
+
+texts = ["Example sentence one.", "Example sentence two."]
+labels_task0 = [1,0]
+labels_task1 = [0,1]
+
+dataset = tf.data.Dataset.from_tensor_slices((
+    tf.constant(texts, dtype=tf.string),
+    {
+        'task_0': tf.constant(labels_task0, dtype=tf.float32),
+        'task_1': tf.constant(labels_task1, dtype=tf.float32)
+    }
+))
+dataset = dataset.shuffle(len(texts)).batch(32).prefetch(tf.data.AUTOTUNE)
+```
+
+3. **Train Normally**
+```python
+from multitask.trainers import Trainer
+from multitask.config import TrainingConfig
+
+training_config = TrainingConfig(epochs=10, batch_size=32)
+trainer = Trainer(model, config=training_config)
+
+# num_tasks should match the number of architectural task outputs
+history, thresholds = trainer.fit(train_dataset, val_dataset, num_tasks=2)
+```
+
+**Key Points**
+- Input format is a 1D `tf.string` tensor per batch: shape `[batch_size]`
+- No local tokenization keys required (`input_ids`, `attention_mask`, etc)
+- API encoders are **not trainable**, i.e. the encoder's embedding behavior does not change, but training learns how to map embeddings to task labels
+- Embeddings cached by the API encoder layer to reduce repeated API calls
+
+**Requirements**
+- ✅ Shape: [batch_size] for text batches
+- ✅ Dtype: tf.string for inputs
+- ✅ Labels still follow standard labels_dict format
+- ✅ Same (inputs, labels_dict) contract as other encoder types
+
+### Format 3: Pre-computed Embedding Input
 
 When using pre-computed embeddings (no `encoder_identifier` in `EncoderConfig`, only `embedding_dim`), inputs should be a **tensor** passed directly through the dataset.
 
@@ -133,17 +203,16 @@ When using pre-computed embeddings (no `encoder_identifier` in `EncoderConfig`, 
 1. **Create model without encoder:**
 ```python
 from multitask import MultiTaskModel
-from multitask.config import ModelConfig
+from multitask.config import ModelConfig, EncoderConfig
 
 config = ModelConfig(
     task_structure=[[2]],
     task_names=['task_0', 'task_1'],
-    embedding_dim=768,  # Stored on encoder_config; required for pre-computed path
+    encoder_config=EncoderConfig(embedding_dim=768)
 )
 
 model = MultiTaskModel(
-    config=config,
-    embedding_dim=768       # Must match; can also rely on config.embedding_dim
+    config=config
 )
 ```
 
@@ -186,15 +255,25 @@ dataset = dataset.batch(32).prefetch(tf.data.AUTOTUNE)
 3. **Train normally:**
 ```python
 from multitask.trainers import Trainer
+from multitask.config import TrainingConfig
 
-trainer = Trainer(model)
-history, thresholds = trainer.fit(dataset, val_dataset, epochs=10)
+training_config = TrainingConfig(
+    epochs=10
+)
+
+trainer = Trainer(
+    model,
+    config=training_config
+)
+
+# Assuming you've split your data into training and validation datasets
+history, thresholds = trainer.fit(train_dataset, val_dataset, num_tasks=2)
 ```
 
 **Key Points:**
 - Embeddings bypass the encoder and go directly to the shared/branch layers
 - Must be 2D tensor: `[batch_size, embedding_dim]` after batching
-- `embedding_dim` must match `ModelConfig.embedding_dim`
+- `embedding_dim` overrides `ModelConfig.encoder_config.embedding_dim`
 - Typically float32 dtype
 - Can use embeddings from any source: sentence-transformers, OpenAI, Cohere, etc.
 
@@ -210,7 +289,7 @@ Labels must be provided as a **dictionary** mapping task names to label tensors.
 
 ### Binary Classification (`task_type='binary'`)
 
-**Format**: Single value per sample (0 or 1), or -1 for masked/missing labels
+**Format**: Single value per sample (0 or 1), or `mask_value` for masked/missing labels 
 
 ```python
 # Option 1: Shape [batch_size]
@@ -224,13 +303,13 @@ labels_dict = {
 }
 ```
 
-**Valid values**: `0`, `1`, `-1` (mask)
+**Valid values**: `0`, `1`, or your configured `mask_value`
 
 **Output**: Model returns probabilities in [0, 1] via sigmoid activation
 
 ### Multiclass Classification (`task_type='multiclass'`)
 
-**Format**: Class index per sample (0 to K-1), or -1 for masked
+**Format**: Class index per sample (0 to K-1), or `mask_value` for masked
 
 ```python
 # For 3 classes (e.g., negative=0, neutral=1, positive=2)
@@ -240,13 +319,13 @@ labels_dict = {
 # Shape: [batch_size]
 ```
 
-**Valid values**: `0` to `K-1` where K = `num_classes_per_task[i]`, or `-1` (mask)
+**Valid values**: `0` to `K-1` where K = `num_classes_per_task[i]`, or `mask_value`
 
 **Output**: Model returns class probabilities via softmax activation
 
 ### Multilabel Classification (`task_type='multilabel'`)
 
-**Format**: Binary indicator for each class (0 or 1), or -1 for masked
+**Format**: Binary indicator for each class (0 or 1), or `mask_value` for masked
 
 ```python
 # For 4 possible labels (e.g., categories: politics, sports, tech, business)
@@ -261,13 +340,35 @@ labels_dict = {
 # Shape: [batch_size, num_classes]
 ```
 
-**Valid values**: `0`, `1`, `-1` (mask) for each class
+**Valid values**: `0`, `1`, or `mask_value` for each class
 
 **Output**: Model returns per-class probabilities via sigmoid activation
 
+**Trainer caveat:** threshold optimization and some classification metrics paths in `Trainer` use the **first column only** when predictions or labels are 2D (`[:, 0]`). For full multi-label training/evaluation per class, confirm your workflow matches that behavior or use per-class tasks.
+
+### Regression (`task_type='regression'`)
+
+**Format**: Single float target per sample, or `mask_value` for masked/missing labels.
+
+```python
+# Option 1: Shape [batch_size]
+labels_dict = {
+    'score': tf.constant([0.32, -0.75, -1.0, 0.91], dtype=tf.float32)  # 3rd sample masked
+}
+
+# Option 2: Shape [batch_size, 1]
+labels_dict = {
+    'score': tf.constant([[0.32], [-0.75], [-1.0], [0.91]], dtype=tf.float32)
+}
+```
+
+**Output**: Model returns one value per sample with linear activation.
+
 ### Label Masking
 
-Use `-1` to indicate missing, invalid, or unlabeled data. Masked labels are:
+`mask_value` indicates missing, invalid, or unlabeled data (default: `-1.0`).
+Configure it in `ModelConfig(mask_value=...)`, then use the same value in all label columns/tensors.
+Masked labels are:
 - **Excluded from loss computation** (don't contribute to training)
 - **Excluded from metrics** (don't affect accuracy, F1, etc.)
 - **Useful for**: Partially labeled data, different tasks available for different samples
@@ -276,22 +377,36 @@ Use `-1` to indicate missing, invalid, or unlabeled data. Masked labels are:
 labels_dict = {
     'task_0': tf.constant([1, 0, -1, 1], dtype=tf.float32),    # Binary: 3rd sample masked
     'task_1': tf.constant([2, -1, 1, 0], dtype=tf.int32),       # Multiclass: 2nd sample masked
-    'task_2': tf.constant([[1, 0, 1], [-1, -1, -1], [0, 1, 0], [1, 1, 1]], dtype=tf.float32)  # Multilabel: 2nd sample masked
+    'task_2': tf.constant([[1, 0, 1], [-1, -1, -1], [0, 1, 0], [1, 1, 1]], dtype=tf.float32),  # Multilabel: 2nd sample masked
+    'task_3': tf.constant([0.5, -1.0, -0.2, 0.9], dtype=tf.float32),  # Regression: 2nd sample masked
 }
+```
+
+```python
+# Example: custom missing-label value instead of -1
+config = ModelConfig(
+    task_structure=[[4]],
+    task_types=['binary', 'multiclass', 'multilabel', 'regression'],
+    # Per task: binary(2), multiclass(K>=3), multilabel(num labels), regression(1)
+    num_classes_per_task=[2, 5, 4, 1],
+    mask_value=-999.0,
+)
 ```
 
 ## Model Output Format
 
 ### Dictionary Outputs
 
-The model returns predictions as a **dictionary** mapping task names to output tensors:
+The model returns predictions as a **dictionary** mapping output names to tensors:
 
 ```python
 outputs = model(inputs)
 # Returns: {
 #     'task_0': tf.Tensor(shape=[batch_size, 1], dtype=float32),      # Binary
 #     'task_1': tf.Tensor(shape=[batch_size, num_classes], dtype=float32),  # Multiclass
-#     'task_2': tf.Tensor(shape=[batch_size, num_classes], dtype=float32)   # Multilabel
+#     'task_2': tf.Tensor(shape=[batch_size, num_classes], dtype=float32),   # Multilabel
+#     'task_3': tf.Tensor(shape=[batch_size, 1], dtype=float32),             # Regression
+#     # Optional pooled outputs appear here too when output_pools is configured
 # }
 ```
 
@@ -306,13 +421,15 @@ For compatibility with external tools that expect concatenated outputs:
 
 ```python
 # Flatten dictionary to concatenated tensor
-flat_tensor = model.flatten_outputs(outputs)
+concatenated_tensor, task_indices = model.flatten_outputs(outputs)
 # Shape: [batch_size, total_output_dim]
 
 # Unflatten back to dictionary
-outputs_dict = model.unflatten_outputs(flat_tensor)
+outputs_dict = model.unflatten_outputs(concatenated_tensor)
 # Returns: {'task_0': ..., 'task_1': ..., 'task_2': ...}
 ```
+
+**Pools:** `flatten_outputs` concatenates **all keys** present in the dict (tasks and pool outputs when included). `unflatten_outputs` only slices **architectural task** widths in order, then **recomputes** pools from those tasks. For a true round-trip on tensors, flatten **task outputs only** (exclude pool keys), or accept that pool entries are reconstructed rather than restored from the flat tensor.
 
 ## Preprocessing Examples
 
@@ -395,6 +512,9 @@ dataset = dataset.batch(32).prefetch(tf.data.AUTOTUNE)
 ```python
 import tensorflow as tf
 import numpy as np
+from multitask import MultiTaskModel
+from multitask.config import ModelConfig, EncoderConfig, TrainingConfig
+from multitask.trainers import Trainer
 
 def load_embeddings_and_labels():
     """Load pre-computed embeddings with multiple task labels."""
@@ -430,21 +550,28 @@ def load_embeddings_and_labels():
     
     return dataset.batch(32).prefetch(tf.data.AUTOTUNE)
 
+training_config = TrainingConfig(
+    epochs=10
+)
+
 # Create model and trainer
 config = ModelConfig(
     task_structure=[[3]],
     task_types=['binary', 'multiclass', 'multilabel'],
     num_classes_per_task=[2, 5, 5],
-    task_names=['sentiment', 'category', 'topics']
+    task_names=['sentiment', 'category', 'topics'],
+    encoder_config=EncoderConfig(
+        embedding_dim=768      # Match your embedding dimension
+    )
 )
 
 model = MultiTaskModel(
-    config=config,
-    embedding_dim=768      # Match your embedding dimension
+    config=config
 )
 
-trainer = Trainer(model)
-history, thresholds = trainer.fit(train_dataset, val_dataset, epochs=10)
+# Note: train_dataset and val_dataset are split off from your dataset above.
+trainer = Trainer(model, config=training_config)
+history, thresholds = trainer.fit(train_dataset, val_dataset, num_tasks=3)
 ```
 
 ### Example 4: Computing Embeddings from Scratch
@@ -452,6 +579,9 @@ history, thresholds = trainer.fit(train_dataset, val_dataset, epochs=10)
 ```python
 import tensorflow as tf
 from sentence_transformers import SentenceTransformer
+from multitask import MultiTaskModel
+from multitask.config import ModelConfig, TrainingConfig
+from multitask.trainers import Trainer
 
 # Load embedding model (runs once, before creating dataset)
 embedding_model = SentenceTransformer('all-MiniLM-L6-v2')  # 384-dim
@@ -486,8 +616,11 @@ model = MultiTaskModel(
 )
 
 # Train
-trainer = Trainer(model)
-history, thresholds = trainer.fit(dataset, val_dataset, epochs=10)
+training_config = TrainingConfig(
+    epochs=10
+)
+trainer = Trainer(model, config=training_config)
+history, thresholds = trainer.fit(dataset, val_dataset, num_tasks=1)
 ```
 
 **Why Use Pre-computed Embeddings?**
@@ -504,14 +637,16 @@ import tensorflow as tf
 def create_partially_labeled_dataset(texts, task1_labels, task2_labels):
     """Some samples only have labels for task1, some for task2, some for both."""
     
+    mask_value = -999.0  # should match ModelConfig(mask_value=...)
+
     def preprocess(text, label1, label2):
         # Convert text to BERT inputs (pseudo-code)
         inputs = tokenize_text(text)
         
-        # Use -1 to mask unavailable labels
+        # Use mask_value to mask unavailable labels
         labels_dict = {
-            'task_1': tf.where(tf.math.is_nan(label1), -1.0, label1),  # Mask NaN
-            'task_2': tf.where(tf.math.is_nan(label2), -1.0, label2)
+            'task_1': tf.where(tf.math.is_nan(label1), mask_value, label1),  # Mask NaN
+            'task_2': tf.where(tf.math.is_nan(label2), mask_value, label2)
         }
         
         return inputs, labels_dict
@@ -661,7 +796,7 @@ dataset = tf.data.Dataset.from_generator(...).batch(32)
 
 ❌ **Wrong**: Using values outside valid range
 ```python
-# Binary task with values outside {0, 1, -1}
+# Binary task with values outside {0, 1, mask_value}
 labels_dict = {'binary': tf.constant([0.5, 2, -2], dtype=tf.float32)}  # Wrong!
 
 # Multiclass task with out-of-range indices
@@ -670,10 +805,10 @@ labels_dict = {'multiclass': tf.constant([5, -2], dtype=tf.int32)}  # Wrong if o
 
 ✅ **Correct**: Using valid values
 ```python
-# Binary: 0, 1, or -1
+# Binary: 0, 1, or mask_value
 labels_dict = {'binary': tf.constant([0, 1, -1], dtype=tf.float32)}
 
-# Multiclass with 3 classes: 0, 1, 2, or -1
+# Multiclass with 3 classes: 0, 1, 2, or mask_value
 labels_dict = {'multiclass': tf.constant([2, 0, -1], dtype=tf.int32)}
 ```
 
@@ -782,9 +917,12 @@ for inputs, labels_dict in dataset.take(1):
 Before training, verify:
 
 - [ ] Dataset yields `(inputs, labels_dict)` tuples
-- [ ] **For text encoders**: Inputs are **dict** with correct keys
-  - TF Hub: `input_word_ids`, `input_mask`, `input_type_ids`
-  - HuggingFace: `input_ids`, `attention_mask`, `token_type_ids`
+- [ ] **For text encoders**: Inputs match model type
+  - TF Hub BERT-style: dict keys `input_word_ids`, `input_mask`, `input_type_ids`
+  - TF Hub USE: 1D `tf.string` tensor (`[batch_size]`)
+  - HuggingFace: dict keys `input_ids`, `attention_mask`, `token_type_ids` (if required by model)
+- [ ] **For API encoders**: Inputs are **string tensors**
+  - Use `EncoderConfig(encoder_identifier=...)` with the model name
 - [ ] **For embeddings**: Inputs are **tensor** with shape `[batch_size, embedding_dim]`
   - Use `ModelConfig(embedding_dim=...)` / `EncoderConfig(embedding_dim=...)` with no `encoder_identifier`, and pass `embedding_dim` to `MultiTaskModel` if needed
   - Dataset yields pre-computed embeddings directly
@@ -796,9 +934,9 @@ Before training, verify:
   - Multiclass: `[batch]`
   - Multilabel: `[batch, num_classes]`
 - [ ] Label values are valid:
-  - Binary: `{0, 1, -1}`
-  - Multiclass: `{0..K-1, -1}`
-  - Multilabel: `{0, 1, -1}` per class
+  - Binary: `{0, 1, mask_value}`
+  - Multiclass: `{0..K-1, mask_value}`
+  - Multilabel: `{0, 1, mask_value}` per class
 - [ ] Label dtypes are correct (float32 for binary/multilabel, int32 for multiclass)
 - [ ] Dataset is batched with `.batch(batch_size)`
 - [ ] Used `model.validate_dataset()` to verify format

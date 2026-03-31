@@ -162,7 +162,6 @@ class OpenAIEncoder(APIEncoder):
                 )
 
             self._client = OpenAI(api_key=api_key) # uses OPENAI_API_KEY environment variable
-            # or maybe require user to set this value
         return self._client
     
     def _embed_texts(self, texts: list[str]) -> np.ndarray:

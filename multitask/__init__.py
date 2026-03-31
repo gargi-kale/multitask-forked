@@ -8,7 +8,6 @@ HuggingFace) and allows users to bring their own pre-computed embeddings.
 Main components:
     - models: Multi-task model architectures
     - trainers: Training and evaluation logic
-    - data: Data handling utilities
     - layers: Custom neural network layers
     - utils: Helper functions
 """

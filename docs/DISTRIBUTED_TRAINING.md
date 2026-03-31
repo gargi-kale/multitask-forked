@@ -5,22 +5,48 @@ This guide covers distributed training with the multitask library, including cro
 ## Quick Start
 
 ```python
+import tensorflow as tf
 from multitask import (
     ModelConfig, TrainingConfig, MultiTaskModel, Trainer,
-    get_distribution_strategy, setup_gpu_memory_growth
+    get_distribution_strategy, setup_gpu_memory_growth,
 )
+from multitask.config import EncoderConfig, EncoderIntegration, EncoderInputType
 
-# Setup: enable memory growth and get optimal strategy
 setup_gpu_memory_growth()
 strategy, info = get_distribution_strategy('auto', verbose=True)
 
-# Create model and trainer within strategy scope
+training_config = TrainingConfig(batch_size=32, epochs=2)
+encoder_config = EncoderConfig(
+    encoder_identifier="https://tfhub.dev/google/universal-sentence-encoder/4",
+    encoder_input_type=EncoderInputType.RAW_STRING,
+    encoder_integration=EncoderIntegration.TFHUB,
+    trainable_encoder=False,
+)
+model_config = ModelConfig(
+    task_structure=[[2]],
+    task_names=["task_0", "task_1"],
+    task_types=["binary", "binary"],
+    num_classes_per_task=[2, 2],
+    encoder_config=encoder_config,
+)
+
+# Replace with your real tf.data pipelines that yield (inputs, labels_dict)
+def _example_dataset():
+    texts = tf.constant(["example one", "example two"], dtype=tf.string)
+    labels_dict = {
+        "task_0": tf.constant([0.0, 1.0]),
+        "task_1": tf.constant([1.0, 0.0]),
+    }
+    return tf.data.Dataset.from_tensor_slices((texts, labels_dict)).batch(2)
+
+train_dataset = _example_dataset()
+val_dataset = _example_dataset()
+
 with strategy.scope():
     model = MultiTaskModel(model_config)
     trainer = Trainer(model, training_config, strategy=strategy)
 
-# Train - distribution handled automatically
-history, thresholds = trainer.fit(train_data, val_data)
+history, thresholds = trainer.fit(train_dataset, val_dataset, num_tasks=2)
 ```
 
 ## Platform Compatibility
@@ -71,25 +97,29 @@ from multitask import (
     ModelConfig, TrainingConfig, MultiTaskModel, Trainer,
     get_distribution_strategy, setup_gpu_memory_growth
 )
-import pandas as pd
+from multitask.config import EncoderConfig, EncoderIntegration, EncoderInputType
 
 # Setup
 setup_gpu_memory_growth()
 strategy, info = get_distribution_strategy('auto', verbose=True)
 
-# Load data
-train_data = pd.read_csv('train.csv')
-val_data = pd.read_csv('val.csv')
+# Prepare tf.data.Dataset objects:
+# train_dataset and val_dataset should yield (inputs, labels_dict)
 
 # Create model within strategy scope
 with strategy.scope():
+    encoder_config = EncoderConfig(
+        encoder_integration=EncoderIntegration.TFHUB,
+        encoder_input_type=EncoderInputType.RAW_STRING,
+        encoder_identifier='https://tfhub.dev/google/universal-sentence-encoder/4',
+    )
+    
     model_config = ModelConfig(
-        tasks={
-            'sentiment': {'type': 'multiclass', 'num_classes': 3},
-            'toxicity': {'type': 'binary', 'num_classes': 1},
-        },
-        encoder_type='tfhub',
-        encoder_name='https://tfhub.dev/google/universal-sentence-encoder/4',
+        task_structure=[[2]],
+        task_names=['sentiment', 'toxicity'],
+        task_types=['multiclass', 'binary'],
+        num_classes_per_task=[3, 2],
+        encoder_config=encoder_config
     )
     
     training_config = TrainingConfig(batch_size=32, epochs=10)
@@ -98,7 +128,7 @@ with strategy.scope():
     trainer = Trainer(model, training_config, strategy=strategy)
 
 # Train
-history, thresholds = trainer.fit(train_data, val_data)
+history, thresholds = trainer.fit(train_dataset, val_dataset, num_tasks=2)
 
 # Save
 model.save('models/my_model', thresholds=thresholds)
@@ -156,52 +186,37 @@ strategy, info = get_distribution_strategy('auto')
 pip install tensorflow[and-cuda]
 ```
 
-**Multi-GPU Training:Setup
-
-**Apple Silicon (M1/M2/M3):**
-```bash
-pip install tensorflow-macos tensorflow-metal
+**Multi-GPU Training:**
+```python
+strategy, info = get_distribution_strategy('mirrored', verbose=True)
+print(info)  # Uses MirroredStrategy when >=2 GPUs are available
 ```
-- Uses Metal backend (not CUDA)
-- Single GPU only (unified memory architecture)
-- Some TF ops may not be supported - fall back to CPU if errors occur
 
-**Linux/Windows with NVIDIA:**
-```bash
-pip install tensorflow[and-cuda]
-```
-- Requires CUDA and cuDNN installed
-- Supports multi-GPU with MirroredStrategy
-- Scale batch size with GPU count: `batch_size = 32 * num_gpus
-2. Update TensorFlow and tensorflow-metal:
-   ```bash
-   pip install --upgrade tensorflow-macos tensorflow-metal
-   ```
-
-3. Check TensorFlow Metal compatibility:
-   https://developer.apple.com/metal/tensorflow-plugin/
+**Notes:**
+- Requires NVIDIA drivers plus CUDA/cuDNN compatibility for your TensorFlow version
+- Supports multi-GPU with `MirroredStrategy`
+- Scale batch size with GPU count (for example: `batch_size = 32 * num_gpus`)
 
 ### "Out of memory" errors
 
 **Reduce memory usage:**
-1. Enable memory growth:
-**No GPUs detected:**
-```python
-import tensorflow as tf
-print(tf.config.list_physical_devices('GPU'))  # Check if TF sees GPUs
-```
-- Verify GPU drivers and CUDA/cuDNN versions
-- On Apple Silicon: install `tensorflow-metal`
-
-**Out of memory:**
 ```python
 setup_gpu_memory_growth()  # Enable incremental allocation
 config = TrainingConfig(batch_size=16)  # Reduce batch size
 ```
 
+**No GPUs detected:**
+```python
+import tensorflow as tf
+print(tf.config.list_physical_devices('GPU'))  # Check if TensorFlow sees GPUs
+```
+- Verify GPU drivers and CUDA/cuDNN versions (Linux/Windows NVIDIA)
+- On Apple Silicon: install `tensorflow-metal`
+
+
 **Metal backend errors (Apple Silicon):**
 ```python
-strategy = get_distribution_strategy('cpu')  # Fall back to CPU
+strategy, info = get_distribution_strategy('cpu')  # Fall back to CPU
 ```
 Update TensorFlow: `pip install --upgrade tensorflow-macos tensorflow-metal`
 

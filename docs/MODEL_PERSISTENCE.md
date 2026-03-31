@@ -7,11 +7,21 @@ Save and load multi-task models with optimized thresholds and training state.
 ### Save After Training
 
 ```python
-from multitask import Trainer, TrainingConfig, ModelConfig, MultiTaskModel
+from multitask import Trainer, TrainingConfig, ModelConfig, MultiTaskModel, EncoderConfig
+from multitask.config import EncoderIntegration, EncoderInputType
 
 # Train model
-config = ModelConfig(...)
-model = MultiTaskModel(config, encoder='bert-base-uncased')
+encoder_config = EncoderConfig(
+    encoder_identifier="bert-base-uncased",
+    encoder_input_type=EncoderInputType.HUGGINGFACE_TOKENS,
+    encoder_integration=EncoderIntegration.HUGGINGFACE,
+)
+config = ModelConfig(
+    task_structure=[[10]],
+    task_names=[f"task_{i}" for i in range(10)],
+    encoder_config=encoder_config,
+)
+model = MultiTaskModel(config)
 trainer = Trainer(model, TrainingConfig())
 
 history, thresholds = trainer.fit(
@@ -20,7 +30,7 @@ history, thresholds = trainer.fit(
     optimize_thresholds=True
 )
 
-# Save with thresholds (includes everything)
+# Save with thresholds (recommended for deployment)
 trainer.save_checkpoint('my_model', thresholds)
 
 # Or just save the model with thresholds
@@ -62,11 +72,11 @@ history, new_thresholds = trainer.fit(train_ds, val_ds, num_tasks=10)
 | Weights | ✅ | ✅ |
 | Config | ✅ | ✅ |
 | Encoder info | ✅ | ✅ |
-| **Thresholds** | ✅ | ✅ |
+| **Thresholds** | ✅ (if provided) | ✅ (if provided or available on trainer) |
 | Training config | ❌ | ✅ |
 | Optimizer state | ❌ | ✅ (optional) |
 
-**Key design**: Thresholds are now always saved, ensuring models are deployment-ready immediately.
+**Key design**: Thresholds are saved when provided (or when available on the trainer during checkpoint save), so pass thresholds explicitly when packaging for deployment.
 
 ## Table of Contents
 
@@ -84,15 +94,18 @@ history, new_thresholds = trainer.fit(train_ds, val_ds, num_tasks=10)
 ### Pattern 1: Simple Model Save (Deployment)
 
 ```python
+from multitask import load_model, Trainer, TrainingConfig
+
 # After training
 history, thresholds = trainer.fit(train_ds, val_ds, optimize_thresholds=True)
 
 # Save just the model
 model.save('deploy/model', thresholds=thresholds)
 
-# Later, load for inference
+# Later, load for inference (construct a Trainer around the loaded model)
 model, thresholds = load_model('deploy/model')
-results = trainer.evaluate(test_ds, thresholds=thresholds)
+eval_trainer = Trainer(model, TrainingConfig())
+results = eval_trainer.evaluate(test_ds, thresholds=thresholds)
 ```
 
 **File structure**: Small, contains only what's needed for inference.
@@ -141,26 +154,29 @@ trainer, thresholds = Trainer.load_checkpoint('deploy/v1')
 
 ```python
 model.save(
-    filepath: str,
-    save_format: str = 'tf',
-    thresholds: Optional[dict] = None
+    filepath: str, 
+    save_format: str = 'tf', 
+    thresholds: Optional[Dict[str, Optional[float]]] = None
 ) -> None
 ```
 
 Saves model to directory with optional thresholds.
 
 **Args**:
-- `filepath`: Directory path for saving
-- `save_format`: 'tf' (default) or 'h5'
-- `thresholds`: Optional dict of task_name -> threshold values
+- `filepath`: Directory path to save model artifacts
+- `save_format`: Format to save weights ('tf' or 'h5')
+- `thresholds`: Optional dict of task_name -> threshold values for classification.
+                Useful for binary/multilabel deployment. If None, thresholds can
+                still be passed later to `Trainer.evaluate(...)`, or loaded from
+                `thresholds.json` when available.
 
 **Files created**:
 ```
 filepath/
 ├── config.json       # ModelConfig
 ├── metadata.json     # Encoder info, dropout rate
-├── weights/          # Model weights
-└── thresholds.json   # Optimized thresholds (if provided)
+├── weights.weights.h5  # Model weights (Keras 3 format)
+└── thresholds.json     # Optimized thresholds (if provided)
 ```
 
 ### load_model()
@@ -168,8 +184,7 @@ filepath/
 ```python
 model, thresholds = load_model(
     filepath: str,
-    encoder: Optional[Union[str, Layer]] = None,
-    custom_objects: Optional[dict] = None
+    encoder: Optional[Union[str, Layer]] = None
 ) -> Tuple[MultiTaskModel, Optional[Dict]]
 ```
 
@@ -182,7 +197,7 @@ Loads model and thresholds from directory.
 ```python
 trainer.save_checkpoint(
     filepath: str,
-    thresholds: Optional[dict] = None,
+    thresholds: Optional[Dict[str, Optional[float]]] = None,
     save_format: str = 'tf',
     save_optimizer: bool = True
 ) -> None
@@ -191,10 +206,12 @@ trainer.save_checkpoint(
 Saves complete training checkpoint (includes optimizer state).
 
 **Args**:
-- `thresholds`: Optional thresholds. If None, uses self.thresholds
-- `save_optimizer`: Set to False for deployment-only (saves space)
+- `filepath`: Directory path to save checkpoint
+- `thresholds`: Optional dict of task_name -> threshold values. If None, uses trainer-stored thresholds when available (prefers `self.optimal_thresholds`, then `self.thresholds`).
+- `save_format`: Save-format argument accepted by API (current implementation writes Keras 3 weights to `weights.weights.h5`)
+- `save_optimizer`: Whether to save optimizer state for training resumption. Use False for deployment-only to save space (~2x reduction).
 
-**Files created** (in addition to model.save()):
+**Files created** (in addition to `model.save()`):
 ```
 filepath/
 ├── optimizer.pkl       # Optimizer state (if save_optimizer=True)
@@ -206,18 +223,21 @@ filepath/
 ```python
 trainer, thresholds = Trainer.load_checkpoint(
     filepath: str,
-    encoder: Optional[Union[str, Layer]] = None,
+    encoder: Optional[Union[str, tf.keras.layers.Layer]] = None,
     custom_objects: Optional[dict] = None,
     load_optimizer: bool = True,
     compile_model: bool = False
-) -> Tuple[Trainer, Optional[Dict]]
+) -> Tuple['Trainer', Optional[Dict[str, Optional[float]]]]
 ```
 
 Loads checkpoint and returns ready-to-use Trainer.
 
 **Args**:
-- `load_optimizer`: Whether to restore optimizer state
-- `compile_model`: Required if load_optimizer=True
+- `filepath`: Directory path containing saved checkpoint
+- `encoder`: Optional encoder override (see load_model documentation)
+- `custom_objects`: Present in the API signature, but currently not used by `load_model()`
+- `load_optimizer`: Whether to restore optimizer state for training resumption. Only works if model is compiled first.
+- `compile_model`: Whether to compile the model after loading. Required if load_optimizer=True. Uses saved training config.
 
 ---
 
@@ -289,6 +309,12 @@ model.save('my_model', thresholds=thresholds)
 model.save('my_model')
 ```
 
+You can also pass thresholds explicitly to checkpoint save:
+
+```python
+trainer.save_checkpoint('my_model', thresholds=thresholds)
+```
+
 ### "Cannot load optimizer state"
 
 Optimizer state is optional and only needed for training resumption:
@@ -334,9 +360,7 @@ my_model/
 ├── config.json           # Task structure, types, classes
 ├── metadata.json         # Encoder type/ID, embedding dim
 ├── thresholds.json       # Optimized thresholds (if provided)
-└── weights/              # Model weights (TF format)
-    ├── variables/
-    └── saved_model.pb
+└── weights.weights.h5    # Model weights (Keras 3 format)
 ```
 
 ### Checkpoint Save
@@ -348,7 +372,7 @@ my_model/
 ├── thresholds.json
 ├── training_config.json  # Learning rate, epochs, etc.
 ├── optimizer.pkl         # Optimizer state (if save_optimizer=True)
-└── weights/
+└── weights.weights.h5
 ```
 
 ---
@@ -372,4 +396,4 @@ trainer.save_checkpoint('checkpoints/model', thresholds, save_optimizer=True)
 trainer, thresholds = Trainer.load_checkpoint('checkpoints/model')
 ```
 
-Both approaches save thresholds automatically, ensuring models are deployment-ready.
+Both approaches support threshold persistence when thresholds are available; pass thresholds explicitly to guarantee deployment-ready behavior.
