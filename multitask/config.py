@@ -331,6 +331,8 @@ class ModelConfig:
     # mask value for missing values. Default -1
     # change if -1 is a valid regression target in the data
     mask_value: float = -1.0
+    # Whether to standardize regression targets (mean=0, std=1)
+    standardize_regression: bool = True
     
     def __post_init__(self):
         """Validate configuration after initialization."""
