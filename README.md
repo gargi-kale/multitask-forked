@@ -29,17 +29,68 @@ A flexible multi-task learning library for NLP supporting mixed task types (bina
 
 ## Installation
 
-```bash
-# Basic (for development only - change before distributing)
-pip install -e .
+### From PyPI
 
-# With optional encoder support
-pip install tensorflow-hub transformers
+```bash
+pip install multitask
 ```
 
-**Platform-specific GPU support:**
+This installs the core library and its dependencies:
+
+- TensorFlow (+ TF Hub, TF Text, tf-models-official)
+- NumPy
+- scikit-learn
+- pandas
+- PyYAML
+
+To install with all optional backends and features:
+
+```bash
+pip install 'multitask[huggingface,openai,cohere,voyageai,regression]'
+```
+
+Or install extras individually as needed:
+
+| Extra | What it adds |
+|-------|-------------|
+| `huggingface` | `transformers`, `torch`, `huggingface-hub` |
+| `openai` | OpenAI embeddings API client |
+| `cohere` | Cohere embeddings API client |
+| `voyageai` | Voyage AI embeddings API client |
+| `regression` | `scipy` (Pearson r in evaluation) |
+
+### From source
+
+```bash
+git clone https://github.com/yourusername/multitask.git
+cd multitask
+pip install .                  # core only
+pip install '.[huggingface]'   # core + HuggingFace support
+```
+
+### GPU support
+
 - Apple Silicon: `pip install tensorflow-macos tensorflow-metal`
 - NVIDIA: `pip install tensorflow[and-cuda]`
+
+### Developers
+
+The Conda environment pins every dependency for reproducibility:
+
+```bash
+conda env create -f environment.yml
+conda activate multitask
+pip install -e .
+```
+
+This includes all optional extras, dev tools (pytest, black, mypy), and system libraries (MPI, BLAS, HDF5) that pip cannot provide.
+
+### Package management overview
+
+| File | Audience | Purpose |
+|------|----------|---------|
+| `pyproject.toml` | Users | Declares runtime deps (loose bounds) and optional extras |
+| `environment.yml` | Developers | Pins exact versions for a reproducible conda environment |
 
 ## Quick Start
 
@@ -341,10 +392,13 @@ TrainingConfig(
 
 ## Troubleshooting
 
-**Import errors:**
+**Import errors** — install the missing package or the matching extra:
 ```bash
-pip install tensorflow-hub         # TF Hub
-pip install transformers           # HuggingFace
+pip install tensorflow-hub             # ModuleNotFoundError: tensorflow_hub
+pip install transformers               # ModuleNotFoundError: transformers
+pip install 'multitask[huggingface]'   # ...or install the extra (includes transformers + torch)
+pip install 'multitask[openai]'        # ModuleNotFoundError: openai
+pip install 'multitask[regression]'    # ModuleNotFoundError: scipy
 ```
 
 **GPU issues:**

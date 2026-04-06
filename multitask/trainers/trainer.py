@@ -14,7 +14,6 @@ from sklearn.metrics import (
     roc_auc_score, average_precision_score, accuracy_score,
     mean_squared_error, mean_absolute_error, r2_score
 )
-from scipy.stats import pearsonr
 from multitask.config import TrainingConfig
 from multitask.models.hierarchical import MultiTaskModel
 from multitask.utils.compat import WarmUpWrapper
@@ -1069,6 +1068,7 @@ class Trainer:
                 # R² and Pearson require at least 2 samples
                 if len(y_true_flat) >= 2:
                     r2 = float(r2_score(y_true_flat, y_pred_flat))
+                    from scipy.stats import pearsonr
                     r, _ = pearsonr(y_true_flat, y_pred_flat)
                     output_results['r2'] = r2
                     output_results['pearson_r'] = float(r)
