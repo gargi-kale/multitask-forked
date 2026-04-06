@@ -375,7 +375,10 @@ class Trainer:
         """
         if not self.model.config.has_pools:
             return {}
-        
+
+        if mask_value is None:
+            mask_value = self.mask_value
+
         pooled_labels = {}
         for pool_name in self.model.config.pool_names:
             pool_cfg = self.model.config.get_pool_config(pool_name)
