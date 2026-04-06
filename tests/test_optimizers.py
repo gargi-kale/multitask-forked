@@ -2,6 +2,7 @@ import os
 import tensorflow as tf
 import numpy as np
 import pytest
+import keras
 from multitask.config import ModelConfig, TrainingConfig
 from multitask.models.hierarchical import MultiTaskModel
 from multitask.trainers.trainer import Trainer
@@ -90,8 +91,9 @@ def test_optimizer_with_schedule(optimizer_name, schedule):
     trainer = Trainer(model=build_model(), config=config)
     optimizer = trainer._build_optimizer(steps_per_epoch=100)
     lr_obj = getattr(optimizer, "_learning_rate", optimizer.learning_rate)
-    assert isinstance(lr_obj, tf.keras.optimizers.schedules.LearningRateSchedule), \
+    assert isinstance(lr_obj, keras.optimizers.schedules.LearningRateSchedule), (
         f"Expected schedule object, but got {type(lr_obj)}"
+    )
 
 # Test 2: Warmup Wrapper
 def test_optimizer_with_warmup():
@@ -105,5 +107,6 @@ def test_optimizer_with_warmup():
     lr_obj = getattr(optimizer, "_learning_rate", optimizer.learning_rate)
     
     from multitask.utils.compat import WarmUpWrapper
-    assert isinstance(lr_obj, WarmUpWrapper), \
+    assert isinstance(lr_obj, WarmUpWrapper), (
         f"Expected WarmUpWrapper, but got {type(lr_obj)}"
+    )
