@@ -195,18 +195,21 @@ class Trainer:
                     y_true_flat = tf.reshape(y_task_true, [-1])
                     y_pred_flat = tf.reshape(y_task_pred, [-1])
                     loss_val = tf.square(y_true_flat - y_pred_flat)
-                    mask = tf.cast(tf.not_equal(y_true_flat, mask_value), tf.float32)
+                    mask_val = tf.cast(mask_value, y_true_flat.dtype)
+                    mask = tf.cast(tf.not_equal(y_true_flat, mask_val), tf.float32)
                 
                 elif task_type == 'multiclass':
                     y_true_flat = tf.cast(tf.reshape(y_task_true, [-1]), tf.int32)
                     loss_val = tf.reshape(tf.keras.losses.sparse_categorical_crossentropy(
                         y_true_flat, y_task_pred, from_logits=False), [-1])
-                    mask = tf.cast(tf.not_equal(y_true_flat, tf.cast(mask_value, tf.int32)), tf.float32)
+                    mask_val = tf.cast(mask_value, y_true_flat.dtype)
+                    mask = tf.cast(tf.not_equal(y_true_flat, mask_val), tf.float32)
                 else:
                     y_true_flat = tf.reshape(y_task_true, [-1])
                     y_pred_flat = tf.reshape(y_task_pred, [-1])
                     loss_val = tf.reshape(tf.keras.losses.binary_crossentropy(y_true_flat, y_pred_flat), [-1])
-                    mask = tf.cast(tf.not_equal(y_true_flat, mask_value), tf.float32)
+                    mask_val = tf.cast(mask_value, y_true_flat.dtype)
+                    mask = tf.cast(tf.not_equal(y_true_flat, mask_val), tf.float32)
                 
                 # Class weighting: skip for regression
                 if task_type == 'regression':
@@ -545,7 +548,10 @@ class Trainer:
             for task_name in task_names:
                 labels = labels_dict[task_name]
                 # Count non-masked samples (not equal to self.mask_value)
-                non_masked = tf.reduce_sum(tf.cast(tf.not_equal(labels, self.mask_value), tf.int32)).numpy()
+                mask_val = tf.cast(self.mask_value, labels.dtype)
+                non_masked = tf.reduce_sum(
+                    tf.cast(tf.not_equal(labels, mask_val), tf.int32)
+                ).numpy()
                 task_sample_counts[task_name] += non_masked
             
             if total_samples >= num_samples_to_check:
