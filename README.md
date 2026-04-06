@@ -428,6 +428,9 @@ setup_gpu_memory_growth()
 
 ## Examples
 
+- `examples/minimal_pipeline_example.py`: Shortest full pipeline (NumPy + `tf.data`, train, evaluate, save/load)
+- `examples/hierarchical_pipeline_example.py`: Two-level `task_structure`, same end-to-end flow
+- `examples/dataframe_pipeline_example.py`: Pandas DataFrame → `tf.data` → train → evaluate
 - `examples/save_load_example.py`: Model persistence
 - `examples/distributed_training.py`: Distributed training
 
