@@ -14,7 +14,6 @@ from sklearn.metrics import (
     roc_auc_score, average_precision_score, accuracy_score,
     mean_squared_error, mean_absolute_error, r2_score
 )
-from scipy.stats import pearsonr
 from multitask.config import TrainingConfig
 from multitask.models.hierarchical import MultiTaskModel
 from multitask.utils.compat import WarmUpWrapper
@@ -196,18 +195,21 @@ class Trainer:
                     y_true_flat = tf.reshape(y_task_true, [-1])
                     y_pred_flat = tf.reshape(y_task_pred, [-1])
                     loss_val = tf.square(y_true_flat - y_pred_flat)
-                    mask = tf.cast(tf.not_equal(y_true_flat, mask_value), tf.float32)
+                    mask_val = tf.cast(mask_value, y_true_flat.dtype)
+                    mask = tf.cast(tf.not_equal(y_true_flat, mask_val), tf.float32)
                 
                 elif task_type == 'multiclass':
                     y_true_flat = tf.cast(tf.reshape(y_task_true, [-1]), tf.int32)
                     loss_val = tf.reshape(tf.keras.losses.sparse_categorical_crossentropy(
                         y_true_flat, y_task_pred, from_logits=False), [-1])
-                    mask = tf.cast(tf.not_equal(y_true_flat, tf.cast(mask_value, tf.int32)), tf.float32)
+                    mask_val = tf.cast(mask_value, y_true_flat.dtype)
+                    mask = tf.cast(tf.not_equal(y_true_flat, mask_val), tf.float32)
                 else:
                     y_true_flat = tf.reshape(y_task_true, [-1])
                     y_pred_flat = tf.reshape(y_task_pred, [-1])
                     loss_val = tf.reshape(tf.keras.losses.binary_crossentropy(y_true_flat, y_pred_flat), [-1])
-                    mask = tf.cast(tf.not_equal(y_true_flat, mask_value), tf.float32)
+                    mask_val = tf.cast(mask_value, y_true_flat.dtype)
+                    mask = tf.cast(tf.not_equal(y_true_flat, mask_val), tf.float32)
                 
                 # Class weighting: skip for regression
                 if task_type == 'regression':
@@ -376,7 +378,10 @@ class Trainer:
         """
         if not self.model.config.has_pools:
             return {}
-        
+
+        if mask_value is None:
+            mask_value = self.mask_value
+
         pooled_labels = {}
         for pool_name in self.model.config.pool_names:
             pool_cfg = self.model.config.get_pool_config(pool_name)
@@ -543,7 +548,10 @@ class Trainer:
             for task_name in task_names:
                 labels = labels_dict[task_name]
                 # Count non-masked samples (not equal to self.mask_value)
-                non_masked = tf.reduce_sum(tf.cast(tf.not_equal(labels, self.mask_value), tf.int32)).numpy()
+                mask_val = tf.cast(self.mask_value, labels.dtype)
+                non_masked = tf.reduce_sum(
+                    tf.cast(tf.not_equal(labels, mask_val), tf.int32)
+                ).numpy()
                 task_sample_counts[task_name] += non_masked
             
             if total_samples >= num_samples_to_check:
@@ -1069,6 +1077,7 @@ class Trainer:
                 # R² and Pearson require at least 2 samples
                 if len(y_true_flat) >= 2:
                     r2 = float(r2_score(y_true_flat, y_pred_flat))
+                    from scipy.stats import pearsonr
                     r, _ = pearsonr(y_true_flat, y_pred_flat)
                     output_results['r2'] = r2
                     output_results['pearson_r'] = float(r)

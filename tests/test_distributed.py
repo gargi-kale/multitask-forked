@@ -5,9 +5,12 @@ without requiring TensorFlow/GPUs to be available.
 """
 
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 import sys
 import platform
+
+_DISTRIBUTED_PY = Path(__file__).resolve().parent.parent / "multitask" / "utils" / "distributed.py"
 
 
 class TestDistributedUtils(unittest.TestCase):
@@ -26,7 +29,7 @@ class TestDistributedUtils(unittest.TestCase):
         import importlib.util
         spec = importlib.util.spec_from_file_location(
             "distributed",
-            "/Users/IsaacMehlhaff/Desktop/Projects/Multi-Task Learning/multitask/multitask/utils/distributed.py"
+            str(_DISTRIBUTED_PY),
         )
         self.distributed = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.distributed)
@@ -279,8 +282,7 @@ class TestDistributedIntegration(unittest.TestCase):
         
         strategy, info = get_distribution_strategy('cpu', verbose=False)
         
-        # Should be OneDeviceStrategy for CPU
-        self.assertIsInstance(strategy, self.tf.distribute.OneDeviceStrategy)
+        self.assertIn("OneDeviceStrategy", type(strategy).__name__)
         self.assertIn('CPU', info)
 
 

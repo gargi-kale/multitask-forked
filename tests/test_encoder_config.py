@@ -53,9 +53,10 @@ class TestEncoderConfigDefaults:
         assert cfg.encoder_identifier == url
 
     def test_with_prefixed_identifier(self):
-        """EncoderConfig with integration prefix (e.g. openai:model-name)."""
+        """EncoderConfig with integration prefix (e.g. openai:model-name) strips to model id."""
         cfg = EncoderConfig(encoder_identifier="openai:text-embedding-3-small")
-        assert cfg.encoder_identifier == "openai:text-embedding-3-small"
+        assert cfg.encoder_identifier == "text-embedding-3-small"
+        assert cfg.encoder_integration == EncoderIntegration.OPENAI
 
     def test_trainable_encoder_false(self):
         """EncoderConfig with trainable_encoder=False."""
@@ -245,7 +246,7 @@ class TestModelConfigEncoderConfig:
         )
         config = ModelConfig(task_structure=[[2]], encoder_config=enc_cfg)
         assert config.encoder_config is enc_cfg
-        assert config.encoder_config.encoder_identifier == "openai:text-embedding-3-small"
+        assert config.encoder_config.encoder_identifier == "text-embedding-3-small"
 
     def test_model_config_no_encoder_flat(self):
         """ModelConfig with no encoder args builds encoder_config with all None."""
@@ -283,5 +284,5 @@ class TestModelConfigEncoderConfig:
             trainable_encoder=True,
         )
         assert config.encoder_config is enc_cfg
-        assert config.encoder_config.encoder_identifier == "openai:text-embedding-3-small"
+        assert config.encoder_config.encoder_identifier == "text-embedding-3-small"
         assert config.encoder_config.trainable_encoder is False

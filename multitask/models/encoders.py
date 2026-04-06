@@ -2,19 +2,16 @@ from abc import abstractmethod
 import tensorflow as tf
 import numpy as np
 import os
-import requests
-import diskcache
 
-from huggingface_hub import InferenceClient
 
-# Optionally load environment variables (e.g., API keys) from a .env file
-try:
-    from dotenv import load_dotenv
+def _load_env():
+    """Optionally load environment variables (e.g., API keys) from a .env file."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
 
-    load_dotenv()
-except ImportError:
-    # dotenv is an optional dependency; skip if not installed
-    pass
 
 class APIEncoder(tf.keras.layers.Layer):
     """Base class for API encoders. Embeddings are cached on disk so the same
@@ -25,7 +22,15 @@ class APIEncoder(tf.keras.layers.Layer):
         self.model_name = model_name
         self.embedding_dim = embedding_dim
         self.cache_dir = cache_dir or f".embedding_cache/{model_name.replace('/', '_')}"
+        try:
+            import diskcache
+        except ImportError:
+            raise ImportError(
+                "diskcache is required for API encoders. "
+                "Install with: pip install diskcache"
+            )
         self._cache = diskcache.Cache(self.cache_dir)
+        _load_env()
 
     @abstractmethod
     def _embed_texts(self, texts: list[str]) -> np.ndarray:
@@ -114,6 +119,13 @@ class HFInferenceEncoder(APIEncoder):
     @property
     def client(self):
         if self._client is None:
+            try:
+                from huggingface_hub import InferenceClient
+            except ImportError:
+                raise ImportError(
+                    "huggingface-hub is required for HFInferenceEncoder. "
+                    "Install with: pip install huggingface-hub or pip install multitask[huggingface]"
+                )
             token = os.environ.get("HF_API_TOKEN") or os.environ.get("HF_TOKEN")
             self._client = InferenceClient(token=token)
         return self._client

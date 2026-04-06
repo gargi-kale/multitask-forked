@@ -27,25 +27,61 @@ def _get_build_dummy_input(model: MultiTaskModel, metadata: dict):
     Returns:
         Dummy input (Tensor or dict of Tensors) for model(dummy_input, training=False).
     """
-    DUMMY_INPUT_BUILDERS = {
-        EncoderInputType.HUGGINGFACE_TOKENS: lambda: {
-            'input_ids': tf.zeros((1, 128), dtype=tf.int32),
-            'attention_mask': tf.ones((1, 128), dtype=tf.int32),
-            'token_type_ids': tf.zeros((1, 128), dtype=tf.int32),
-        },
-        EncoderInputType.TFHUB_TOKENS: lambda: {
-            'input_word_ids': tf.zeros((1, 128), dtype=tf.int32),
-            'input_mask': tf.ones((1, 128), dtype=tf.int32),
-            'input_type_ids': tf.zeros((1, 128), dtype=tf.int32),
-        },
-        EncoderInputType.RAW_STRING: lambda: tf.constant(["dummy text"], dtype=tf.string),
-        EncoderInputType.PRECOMPUTED: lambda: tf.zeros((1, metadata['embedding_dim']))
-    }
+    meta = metadata or {}
+    uses_encoder = getattr(model, "uses_encoder", True)
 
-    input_type = getattr(model, 'encoder_input_type', None)
+    def _embedding_dim() -> int:
+        if meta.get("embedding_dim") is not None:
+            return int(meta["embedding_dim"])
+        cfg = getattr(model, "config", None)
+        ec = getattr(cfg, "encoder_config", None) if cfg is not None else None
+        if ec is not None and ec.embedding_dim is not None:
+            return int(ec.embedding_dim)
+        ed = getattr(model, "embedding_dim", None)
+        if ed is not None:
+            return int(ed)
+        return 128
+
+    input_type = getattr(model, "encoder_input_type", None)
     if input_type is None:
-        input_type = EncoderInputType.PRECOMPUTED
-    return DUMMY_INPUT_BUILDERS.get(input_type)()
+        enc_type = getattr(model, "encoder_type", None)
+        if not uses_encoder:
+            input_type = EncoderInputType.PRECOMPUTED
+        elif enc_type == "huggingface":
+            input_type = EncoderInputType.HUGGINGFACE_TOKENS
+        elif enc_type == "tfhub":
+            ident = (meta.get("encoder_identifier") or "").lower()
+            if "universal-sentence-encoder" in ident:
+                input_type = EncoderInputType.RAW_STRING
+            else:
+                input_type = EncoderInputType.TFHUB_TOKENS
+        elif enc_type in (
+            "openai",
+            "cohere",
+            "voyage",
+            "huggingface_api",
+            "keras",
+            "custom",
+        ):
+            input_type = EncoderInputType.RAW_STRING
+        else:
+            input_type = EncoderInputType.PRECOMPUTED
+
+    if input_type == EncoderInputType.HUGGINGFACE_TOKENS:
+        return {
+            "input_ids": tf.zeros((1, 128), dtype=tf.int32),
+            "attention_mask": tf.ones((1, 128), dtype=tf.int32),
+            "token_type_ids": tf.zeros((1, 128), dtype=tf.int32),
+        }
+    if input_type == EncoderInputType.TFHUB_TOKENS:
+        return {
+            "input_word_ids": tf.zeros((1, 128), dtype=tf.int32),
+            "input_mask": tf.ones((1, 128), dtype=tf.int32),
+            "input_type_ids": tf.zeros((1, 128), dtype=tf.int32),
+        }
+    if input_type == EncoderInputType.RAW_STRING:
+        return tf.constant(["dummy text"], dtype=tf.string)
+    return tf.zeros((1, _embedding_dim()))
 
 
 def load_model(
