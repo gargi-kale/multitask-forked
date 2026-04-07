@@ -6,9 +6,9 @@ from multitask import ModelConfig, MultiTaskModel, load_model, Trainer, Training
 
 # Create a simple model configuration
 config = ModelConfig(
-    task_structure=[2, 1],
+    task_structure=[[2], [2, 1]],
     task_types=['binary', 'binary', 'multiclass'],
-    num_classes_per_task=[1, 1, 3],
+    num_classes_per_task=[2, 2, 3],
     task_names=['task_0', 'task_1', 'task_2']
 )
 
@@ -85,7 +85,7 @@ trainer.save_checkpoint('test_checkpoint', thresholds)
 print("\n" + "="*60)
 print("Testing load_model()...")
 print("="*60)
-loaded_model = load_model('test_model')
+loaded_model, _ = load_model('test_model')
 
 # Verify outputs match
 print("\nVerifying model outputs match...")

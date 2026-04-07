@@ -8,14 +8,17 @@ import copy
 import tensorflow as tf
 from typing import Optional, Union, Dict, List, Any, Tuple
 from multitask.config import ModelConfig, EncoderConfig, EncoderInputType, EncoderIntegration
-from .encoders import OpenAIEncoder, CohereEncoder, VoyageEncoder, HFInferenceEncoder
 
-API_ENCODER_CLASSES = {
-    EncoderIntegration.OPENAI: OpenAIEncoder,
-    EncoderIntegration.COHERE: CohereEncoder,
-    EncoderIntegration.VOYAGE: VoyageEncoder,
-    EncoderIntegration.HUGGINGFACE_API: HFInferenceEncoder,
-}
+
+def _get_api_encoder_classes():
+    """Lazy-load encoder classes to avoid pulling in optional deps at import time."""
+    from .encoders import OpenAIEncoder, CohereEncoder, VoyageEncoder, HFInferenceEncoder
+    return {
+        EncoderIntegration.OPENAI: OpenAIEncoder,
+        EncoderIntegration.COHERE: CohereEncoder,
+        EncoderIntegration.VOYAGE: VoyageEncoder,
+        EncoderIntegration.HUGGINGFACE_API: HFInferenceEncoder,
+    }
 
 
 class MultiTaskModel(tf.keras.Model):
@@ -203,8 +206,8 @@ class MultiTaskModel(tf.keras.Model):
                 self.encoder_input_type = EncoderInputType.HUGGINGFACE_TOKENS
                 self.encoder_type = EncoderIntegration.HUGGINGFACE.value
 
-            elif encoder_integration in API_ENCODER_CLASSES:
-                encoder_class = API_ENCODER_CLASSES.get(encoder_integration)
+            elif encoder_integration in _get_api_encoder_classes():
+                encoder_class = _get_api_encoder_classes().get(encoder_integration)
                 self.encoder = encoder_class(model_name=encoder_identifier, name='encoder')
                 self.encoder_input_type = EncoderInputType.RAW_STRING
                 self.encoder_type = encoder_integration.value

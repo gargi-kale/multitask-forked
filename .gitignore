@@ -163,3 +163,7 @@ results/
 outputs/
 test_spider_persistence/
 tfhub_cache/
+
+# Test scripts
+local_test_runs/
+cluster_runs/

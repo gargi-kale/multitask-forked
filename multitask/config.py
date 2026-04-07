@@ -11,6 +11,30 @@ from typing import List, Optional, Dict, Any
 from enum import Enum
 
 
+def _is_keras_layer(obj: Any) -> bool:
+    """
+    True if obj is a Keras Layer (TF 2.x / Keras 3 compatible).
+
+    In some setups, `tf.keras.layers.Layer` is not a normal `Type` object.
+    """
+    if obj is None:
+        return False
+    try:
+        import tensorflow as tf
+        layer_cls = getattr(tf.keras.layers, "Layer", None)
+        if isinstance(layer_cls, type):
+            return isinstance(obj, layer_cls)
+    except TypeError:
+        pass
+    try:
+        from keras.layers import Layer as KerasLayer
+        if isinstance(KerasLayer, type):
+            return isinstance(obj, KerasLayer)
+    except (TypeError, ImportError):
+        pass
+    return False
+
+
 """
 Encoder classes for better scalability and separation of concerns. All encoder-
 related state and logic live in EncoderConfig. This limits flat fields and branches
@@ -97,8 +121,7 @@ class EncoderConfig:
     def __post_init__(self):
         """Validate encoder configuration."""
         if self.encoder is not None:
-            import tensorflow as tf
-            if not isinstance(self.encoder, tf.keras.layers.Layer):
+            if not _is_keras_layer(self.encoder):
                 raise ValueError("Custom encoder must be a Keras Layer.")
             if self.encoder_input_type is None:
                 raise ValueError("Custom encoder requires encoder_input_type.")

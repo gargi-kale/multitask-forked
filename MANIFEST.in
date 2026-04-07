@@ -2,7 +2,6 @@
 include LICENSE
 include README.md
 include pyproject.toml
-include requirements.txt
 
 # Include all package data
 recursive-include multitask *.py
@@ -15,21 +14,15 @@ global-exclude .DS_Store
 global-exclude *.so
 global-exclude *.dylib
 
-# Exclude development and test files
-exclude Makefile
-exclude main.py
-exclude main_embedding.py
-exclude main.ipynb
+# Exclude development, test, and legacy files
 recursive-exclude tests *
 recursive-exclude docs *
 recursive-exclude examples *
-recursive-exclude configs *
-recursive-exclude data *
-recursive-exclude input *
-recursive-exclude output *
-recursive-exclude results *
-recursive-exclude train_test *
-recursive-exclude models *
-recursive-exclude utils *
+recursive-exclude legacy *
+recursive-exclude multitask/local_test_runs *
+recursive-exclude multitask/cluster_runs *
+exclude environment.yml
+exclude requirements.txt
 prune .git
 prune .github
+prune .embedding_cache

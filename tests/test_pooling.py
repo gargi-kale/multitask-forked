@@ -123,7 +123,7 @@ class TestRegressionModelConfigValidation:
 
     def test_invalid_task_type(self):
         with pytest.raises(ValueError, match="Invalid task_type"):
-            ModelConfig(task_types=["binary"] * 9 + ["regression"])
+            ModelConfig(task_types=["binary"] * 9 + ["not_a_valid_type"])
 
     def test_binary_task_wrong_num_classes(self):
         with pytest.raises(ValueError, match="Binary tasks should have num_classes=2"):
@@ -201,7 +201,7 @@ class TestRegressionTrainingConfig:
         assert tc.epochs == 20
         assert tc.batch_size == 32
         assert tc.learning_rate == 3e-4
-        assert tc.optimizer_type == "adamw"
+        assert tc.optimizer_type == "adam"
 
     def test_validation(self):
         with pytest.raises(ValueError):

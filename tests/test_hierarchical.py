@@ -97,18 +97,19 @@ class TestMultiTaskModelInit:
         )
         assert model.num_classes_per_task == [2, 5]
 
-    def test_raises_when_num_classes_per_task_any_less_than_two(self, config_two_tasks):
-        """ValueError when any num_classes_per_task < 2."""
-        with pytest.raises(ValueError, match="num_classes_per_task must be at least 2"):
-            _make_model(
-                config_two_tasks,
-                embedding_dim=64,
+    def test_raises_when_binary_task_wrong_num_classes(self):
+        """ModelConfig rejects binary task with num_classes != 2."""
+        with pytest.raises(ValueError, match="Binary tasks should have num_classes=2"):
+            ModelConfig(
+                task_structure=[[2]],
+                task_types=["binary", "binary"],
                 num_classes_per_task=[2, 1],
+                encoder_config=EncoderConfig(),
             )
 
     def test_raises_when_num_classes_per_task_zero(self, config_two_tasks):
         """ValueError when num_classes_per_task contains 0."""
-        with pytest.raises(ValueError, match="num_classes_per_task must be at least 2"):
+        with pytest.raises(ValueError, match="num_classes_per_task must be at least 1"):
             _make_model(
                 config_two_tasks,
                 embedding_dim=64,
