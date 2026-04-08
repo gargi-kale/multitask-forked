@@ -1097,6 +1097,7 @@ class MultiTaskModel(tf.keras.Model):
             'pooling_strategy': self.config.pooling_strategy,
             'output_pools': self.config.output_pools,
             'mask_value': self.config.mask_value,
+            'standardize_regression': self.config.standardize_regression,
             **self.config.encoder_config.to_dict_for_save(),
         }
         
@@ -1123,6 +1124,12 @@ class MultiTaskModel(tf.keras.Model):
         if thresholds is not None:
             with open(os.path.join(filepath, 'thresholds.json'), 'w') as f:
                 json.dump(thresholds, f, indent=2)
+        
+        # Save regression standardization stats if available
+        if hasattr(self, '_regression_stats') and self._regression_stats:
+            with open(os.path.join(filepath, 'regression_stats.json'), 'w') as f:
+                json.dump(self._regression_stats, f, indent=2)
+            print(f"  - Regression stats: {os.path.join(filepath, 'regression_stats.json')}")
         
         print(f"Model saved to {filepath}/")
         print(f"  - Weights: {weights_path}")

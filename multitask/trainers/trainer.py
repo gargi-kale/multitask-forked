@@ -94,6 +94,72 @@ class Trainer:
                 raise ValueError(f"Multilabel task '{task_name}' has partially missing observations, which is not allowed.\n"
                                  "Each observation must have either all labels present or all labels missing and masked.\n"
                                  "Instead, consider splitting the task into separate binary tasks.")
+    
+    def _compute_regression_stats(
+        self,
+        dataset: tf.data.Dataset,
+        num_samples_to_check: int = 10000
+    ) -> Dict[str, Dict[str, float]]:
+        """Compute mean and std for regression tasks from training data.
+        
+        Used to standardize regression targets in the loss function,
+        preventing regression loss from dominating classification loss.
+        
+        Args:
+            dataset: Training dataset to compute stats from
+            num_samples_to_check: Max number of samples to scan
+            
+        Returns:
+            Dict of {task_name: {"mean": float, "std": float}} for each
+            regression task. Empty dict if no regression tasks or
+            standardization is disabled.
+        """
+        if not self.model.config.standardize_regression:
+            return {}
+        
+        task_names = self.model.task_names or [f'task_{i}' for i in range(self.model.config.total_outputs)]
+        
+        # Identify regression tasks
+        regression_tasks = []
+        for task_name in task_names:
+            real_idx = list(self.model.task_names).index(task_name)
+            if self.model.config.get_task_type(real_idx) == 'regression':
+                regression_tasks.append(task_name)
+        
+        if not regression_tasks:
+            return {}
+        
+        # Collect non-masked labels
+        task_values = {name: [] for name in regression_tasks}
+        total_samples = 0
+        
+        for inputs, labels_dict in dataset.take(num_samples_to_check):
+            batch_size = tf.shape(list(labels_dict.values())[0])[0].numpy()
+            total_samples += batch_size
+            
+            for task_name in regression_tasks:
+                labels = labels_dict[task_name].numpy().ravel()
+                valid = labels[labels != self.mask_value]
+                if len(valid) > 0:
+                    task_values[task_name].extend(valid.tolist())
+            
+            if total_samples >= num_samples_to_check:
+                break
+        
+        # Compute mean and std
+        stats = {}
+        for task_name in regression_tasks:
+            values = np.array(task_values[task_name])
+            if len(values) >= 2:
+                stats[task_name] = {
+                    "mean": float(np.mean(values)),
+                    "std": float(np.std(values)),
+                }
+            else:
+                # Not enough data — use identity transform
+                stats[task_name] = {"mean": 0.0, "std": 1.0}
+        
+        return stats
                 
     def _build_loss_function(
         self,
@@ -194,9 +260,23 @@ class Trainer:
                     # MSE loss, no class weighting
                     y_true_flat = tf.reshape(y_task_true, [-1])
                     y_pred_flat = tf.reshape(y_task_pred, [-1])
+                    mask = tf.cast(tf.not_equal(y_true_flat, mask_value), tf.float32)
+                    
+                    # Standardize both target and prediction before MSE.
+                    # This is equivalent to MSE / std², which scales down the
+                    # regression loss to be comparable with classification losses.
+                    # The model still predicts in original scale
+                    # transform needed at inference.
+                    
+                    if (hasattr(self.model, '_regression_stats')
+                            and task_name in self.model._regression_stats):
+                        stats = self.model._regression_stats[task_name]
+                        mean = tf.constant(stats['mean'], dtype=tf.float32)
+                        std = tf.constant(stats['std'] + 1e-7, dtype=tf.float32)
+                        y_true_flat = (y_true_flat - mean) / std
+                        y_pred_flat = (y_pred_flat - mean) / std
+                    
                     loss_val = tf.square(y_true_flat - y_pred_flat)
-                    mask_val = tf.cast(mask_value, y_true_flat.dtype)
-                    mask = tf.cast(tf.not_equal(y_true_flat, mask_val), tf.float32)
                 
                 elif task_type == 'multiclass':
                     y_true_flat = tf.cast(tf.reshape(y_task_true, [-1]), tf.int32)
@@ -749,6 +829,19 @@ class Trainer:
                     print("Computing task weights from training data...")
                     task_weights = self._compute_task_weights(train_dataset)
                     print(f"Task weights: {[f'{w:.3f}' for w in task_weights]}")
+                    
+                if task_weights is None:
+                    print("Computing task weights from training data...")
+                    task_weights = self._compute_task_weights(train_dataset)
+                    print(f"Task weights: {[f'{w:.3f}' for w in task_weights]}")
+                
+                # Compute regression standardization stats from training data
+                regression_stats = self._compute_regression_stats(train_dataset)
+                if regression_stats:
+                    print("Regression target standardization:")
+                    for name, s in regression_stats.items():
+                        print(f"  {name}: mean={s['mean']:.4f}, std={s['std']:.4f}")
+                self.model._regression_stats = regression_stats
                 
                 loss_fn = self._build_loss_function(
                     num_tasks=num_tasks,

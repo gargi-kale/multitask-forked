@@ -192,6 +192,14 @@ def load_model(
     if os.path.exists(thresholds_path):
         with open(thresholds_path, 'r') as f:
             thresholds = json.load(f)
+            
+    # Load regression standardization stats if available
+    regression_stats_path = os.path.join(filepath, 'regression_stats.json')
+    if os.path.exists(regression_stats_path):
+        with open(regression_stats_path, 'r') as f:
+            model._regression_stats = json.load(f)
+    else:
+        model._regression_stats = {}
     
     print(f"Model loaded from {filepath}/")
     print(f"  - Encoder type: {model.encoder_type or 'embeddings'}")
