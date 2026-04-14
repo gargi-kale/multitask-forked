@@ -1,4 +1,5 @@
-"""Unit tests for distributed training utilities.
+"""
+Unit tests for distributed training utilities.
 
 These tests verify the logic of platform detection and strategy selection
 without requiring TensorFlow/GPUs to be available.
@@ -284,6 +285,29 @@ class TestDistributedIntegration(unittest.TestCase):
         
         self.assertIn("OneDeviceStrategy", type(strategy).__name__)
         self.assertIn('CPU', info)
+
+
+class TestPrintDeviceInfo(unittest.TestCase):
+    """Tests for print_device_info()."""
+
+    def test_print_device_info_runs_without_error(self):
+        """print_device_info() should complete without raising any exception."""
+        from multitask.utils.distributed import print_device_info
+        try:
+            print_device_info()
+        except Exception as exc:
+            self.fail(f"print_device_info() raised an unexpected exception: {exc}")
+
+    def test_print_device_info_produces_output(self):
+        """print_device_info() should print something to stdout."""
+        import io
+        from contextlib import redirect_stdout
+        from multitask.utils.distributed import print_device_info
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_device_info()
+        output = buf.getvalue()
+        self.assertGreater(len(output), 0, "print_device_info() produced no output")
 
 
 if __name__ == '__main__':

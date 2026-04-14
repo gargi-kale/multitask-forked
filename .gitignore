@@ -166,7 +166,7 @@ tfhub_cache/
 
 # Test scripts
 local_test_runs/
-# cluster_runs/
+cluster_runs/
 
 # Local testing output
 # Written by model.save('test_model'). This is the saved model (architecture + 

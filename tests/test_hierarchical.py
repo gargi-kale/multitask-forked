@@ -282,3 +282,88 @@ class TestGetConfig:
         assert config["uses_encoder"] is False
         assert config["embedding_dim"] == 64
         assert config["num_classes_per_task"] == [2, 2]
+
+
+# --- 3-level hierarchical branching ---
+
+
+class TestThreeLevelBranching:
+    """Tests for a 3-level task_structure (depth 3 branching hierarchy).
+
+    Structure ``[[2], [3, 4], [1, 2, 1, 1, 1, 2]]``:
+      Level 0: 2 initial branches
+      Level 1: branch 0 → 3 children, branch 1 → 4 children  (7 branches total)
+      Level 2: each of 7 branches splits as [1, 2, 1, 1, 1, 2]
+      Total outputs: 1 + 2 + 1 + 1 + 1 + 2 = 8
+    """
+
+    STRUCTURE = [[2], [3, 4], [1, 2, 1, 1, 1, 1, 1]]
+    N_OUTPUTS = 8  # sum of last level
+
+    @pytest.fixture
+    def config_3level(self):
+        return ModelConfig(
+            task_structure=self.STRUCTURE,
+            task_names=[f"task_{i}" for i in range(self.N_OUTPUTS)],
+            shared_layer_sizes=[32],
+            default_layer_sizes=[16],
+            encoder_config=EncoderConfig(),
+        )
+
+    def test_model_builds(self, config_3level):
+        model = _make_model(config_3level, embedding_dim=64)
+        assert model is not None
+        assert len(model.num_classes_per_task) == self.N_OUTPUTS
+
+    def test_call_returns_correct_output_keys(self, config_3level):
+        model = _make_model(config_3level, embedding_dim=64)
+        x = tf.random.normal((4, 64))
+        out = model(x, training=False)
+        expected_keys = {f"task_{i}" for i in range(self.N_OUTPUTS)}
+        assert set(out.keys()) == expected_keys
+
+    def test_output_shapes_all_binary(self, config_3level):
+        model = _make_model(config_3level, embedding_dim=64)
+        x = tf.random.normal((4, 64))
+        out = model(x, training=False)
+        for key, tensor in out.items():
+            assert tensor.shape == (4, 1), f"Unexpected shape for '{key}': {tensor.shape}"
+
+    def test_get_task_info_count_and_depth(self, config_3level):
+        model = _make_model(config_3level, embedding_dim=64)
+        info = model.get_task_info()
+        assert len(info) == self.N_OUTPUTS
+        # All paths should have length 3 (3-level structure)
+        for entry in info:
+            assert len(entry["parent_branch_path"]) == 3, (
+                f"Expected path length 3, got {entry['parent_branch_path']}"
+            )
+
+    def test_summary_tree_shows_correct_total(self, config_3level):
+        model = _make_model(config_3level, embedding_dim=64)
+        summary = model.summary_tree()
+        assert f"Total Outputs: {self.N_OUTPUTS}" in summary
+
+    def test_flatten_unflatten_roundtrip(self, config_3level):
+        model = _make_model(config_3level, embedding_dim=64)
+        x = tf.random.normal((4, 64))
+        out = model(x, training=False)
+        flat, _ = model.flatten_outputs(out)
+        restored = model.unflatten_outputs(flat)
+        for name in out:
+            tf.debugging.assert_near(restored[name], out[name])
+
+    def test_asymmetric_3level_structure(self):
+        """Verify an asymmetric 3-level structure builds and runs without error."""
+        # Level 0: 3 branches, Level 1: [1, 2, 1] (4 total), Level 2: [2, 1, 3, 2]
+        config = ModelConfig(
+            task_structure=[[3], [1, 2, 1], [2, 1, 3, 2]],
+            task_names=[f"t{i}" for i in range(8)],
+            shared_layer_sizes=[32],
+            default_layer_sizes=[16],
+            encoder_config=EncoderConfig(),
+        )
+        model = _make_model(config, embedding_dim=64)
+        x = tf.random.normal((2, 64))
+        out = model(x, training=False)
+        assert len(out) == 8

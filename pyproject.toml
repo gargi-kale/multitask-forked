@@ -69,6 +69,7 @@ dev = [
     "coverage>=7.0",
     "black>=25.0",
     "mypy>=1.19",
+    "python-dotenv>=1.0",
 ]
 
 [project.urls]

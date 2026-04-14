@@ -173,6 +173,48 @@ class TestTfHubUniversalSentenceEncoderIntegration:
         assert out["task_0"].shape == (BATCH_SIZE, 1)
         assert out["task_1"].shape == (BATCH_SIZE, 1)
 
+    def test_tfhub_use_trainable_encoder_true(self):
+        """TF Hub USE with trainable_encoder=True (default): KerasLayer is trainable."""
+        from multitask.models.hierarchical import MultiTaskModel
+
+        config = _get_base_config()
+        enc_url = "https://tfhub.dev/google/universal-sentence-encoder/4"
+        enc_cfg = EncoderConfig(
+            encoder_identifier=enc_url,
+            encoder_integration=EncoderIntegration.TFHUB,
+            encoder_input_type=EncoderInputType.RAW_STRING,
+            trainable_encoder=True,
+        )
+        try:
+            model = MultiTaskModel(config=config, encoder_config=enc_cfg)
+        except (ValueError, OSError) as e:
+            err_msg = str(e).lower()
+            if "saved_model.pb" in err_msg or "incompatible" in err_msg or "unknown type" in err_msg:
+                pytest.skip("USE model failed to load (TF Hub cache / compatibility).")
+            raise
+        assert model.encoder.trainable is True
+
+    def test_tfhub_use_trainable_encoder_false(self):
+        """TF Hub USE with trainable_encoder=False: hub KerasLayer is frozen."""
+        from multitask.models.hierarchical import MultiTaskModel
+
+        config = _get_base_config()
+        enc_url = "https://tfhub.dev/google/universal-sentence-encoder/4"
+        enc_cfg = EncoderConfig(
+            encoder_identifier=enc_url,
+            encoder_integration=EncoderIntegration.TFHUB,
+            encoder_input_type=EncoderInputType.RAW_STRING,
+            trainable_encoder=False,
+        )
+        try:
+            model = MultiTaskModel(config=config, encoder_config=enc_cfg)
+        except (ValueError, OSError) as e:
+            err_msg = str(e).lower()
+            if "saved_model.pb" in err_msg or "incompatible" in err_msg or "unknown type" in err_msg:
+                pytest.skip("USE model failed to load (TF Hub cache / compatibility).")
+            raise
+        assert model.encoder.trainable is False
+
 
 # --- HuggingFace encoders (ENCODER_SUPPORT.md) ---
 
@@ -211,6 +253,18 @@ class TestHuggingFaceEncoderIntegration:
     def test_distilbert_base_uncased(self):
         self._hf_forward("distilbert-base-uncased")
 
+    def test_forward_dict_missing_input_ids_raises(self):
+        """HuggingFace token dict must include required keys (e.g. input_ids)."""
+        from multitask.models.hierarchical import MultiTaskModel
+
+        model = MultiTaskModel(config=_get_base_config(), encoder="distilbert-base-uncased")
+        bad_inputs = {
+            "attention_mask": tf.ones((BATCH_SIZE, 128), dtype=tf.int32),
+            "token_type_ids": tf.zeros((BATCH_SIZE, 128), dtype=tf.int32),
+        }
+        with pytest.raises(Exception):
+            model(inputs=bad_inputs, training=False)
+
     def test_roberta_large(self):
         self._hf_forward("roberta-large", max_length=64)
 
@@ -219,6 +273,33 @@ class TestHuggingFaceEncoderIntegration:
 
     def test_bert_base_multilingual_cased(self):
         self._hf_forward("bert-base-multilingual-cased")
+
+    def test_distilbert_trainable_encoder_true(self):
+        """Default HuggingFace build uses trainable_encoder=True."""
+        from multitask.models.hierarchical import MultiTaskModel
+
+        model = MultiTaskModel(config=_get_base_config(), encoder="distilbert-base-uncased")
+        assert model.encoder.trainable is True
+
+    def test_distilbert_trainable_encoder_false(self):
+        """trainable_encoder=False freezes the HF transformer."""
+        from multitask.models.hierarchical import MultiTaskModel
+
+        enc_cfg = EncoderConfig(
+            encoder_identifier="distilbert-base-uncased",
+            encoder_integration=EncoderIntegration.HUGGINGFACE,
+            encoder_input_type=EncoderInputType.HUGGINGFACE_TOKENS,
+            trainable_encoder=False,
+        )
+        base = _get_base_config()
+        config = ModelConfig(
+            task_structure=base.task_structure,
+            shared_layer_sizes=base.shared_layer_sizes,
+            default_layer_sizes=base.default_layer_sizes,
+            encoder_config=enc_cfg,
+        )
+        model = MultiTaskModel(config=config)
+        assert model.encoder.trainable is False
 
 
 # --- OpenAI API encoder ---
@@ -279,6 +360,18 @@ class TestOpenAIEncoderIntegration:
         tf.debugging.assert_near(out1["task_0"], out2["task_0"])
         tf.debugging.assert_near(out1["task_1"], out2["task_1"])
 
+    @pytest.mark.parametrize("model_suffix", ["text-embedding-3-large", "text-embedding-ada-002"])
+    def test_openai_extra_models_forward(self, model_suffix):
+        """Additional OpenAI embedding model ids (requires OPENAI_API_KEY)."""
+        if not os.environ.get("OPENAI_API_KEY"):
+            pytest.skip("OPENAI_API_KEY not set")
+        from multitask.models.hierarchical import MultiTaskModel
+
+        model = MultiTaskModel(config=_get_base_config(), encoder=f"openai:{model_suffix}")
+        inputs = tf.constant(SAMPLE_TEXTS)
+        out = model(inputs, training=False)
+        assert out["task_0"].shape == (BATCH_SIZE, 1)
+
 
 # --- Cohere API encoder ---
 
@@ -303,6 +396,17 @@ class TestCohereEncoderIntegration:
         assert len(out) == 2
         assert out["task_0"].shape == (BATCH_SIZE, 1)
         assert out["task_1"].shape == (BATCH_SIZE, 1)
+
+    def test_cohere_embed_english_light_forward(self):
+        """Cohere light model id (requires COHERE_API_KEY)."""
+        if not os.environ.get("COHERE_API_KEY"):
+            pytest.skip("COHERE_API_KEY not set")
+        from multitask.models.hierarchical import MultiTaskModel
+
+        model = MultiTaskModel(config=_get_base_config(), encoder="cohere:embed-english-light-v3.0")
+        inputs = tf.constant(SAMPLE_TEXTS)
+        out = model(inputs, training=False)
+        assert out["task_0"].shape == (BATCH_SIZE, 1)
 
 
 # --- Voyage AI API encoder ---
@@ -355,3 +459,17 @@ class TestHuggingFaceInferenceEncoderIntegration:
         assert len(out) == 2
         assert out["task_0"].shape == (BATCH_SIZE, 1)
         assert out["task_1"].shape == (BATCH_SIZE, 1)
+
+    def test_hf_inference_bge_small_forward(self):
+        """HF Inference API with BAAI/bge-small-en-v1.5 (requires HF_API_TOKEN or HF_TOKEN)."""
+        if not os.environ.get("HF_API_TOKEN") and not os.environ.get("HF_TOKEN"):
+            pytest.skip("HF_API_TOKEN / HF_TOKEN not set")
+        from multitask.models.hierarchical import MultiTaskModel
+
+        model = MultiTaskModel(
+            config=_get_base_config(),
+            encoder="huggingface_api:BAAI/bge-small-en-v1.5",
+        )
+        inputs = tf.constant(SAMPLE_TEXTS)
+        out = model(inputs, training=False)
+        assert out["task_0"].shape == (BATCH_SIZE, 1)

@@ -1,4 +1,6 @@
-"""Tests for EncoderConfig and ModelConfig encoder_config integration."""
+"""
+Tests for EncoderConfig and ModelConfig encoder_config integration.
+"""
 
 import pytest
 
@@ -57,6 +59,18 @@ class TestEncoderConfigDefaults:
         cfg = EncoderConfig(encoder_identifier="openai:text-embedding-3-small")
         assert cfg.encoder_identifier == "text-embedding-3-small"
         assert cfg.encoder_integration == EncoderIntegration.OPENAI
+
+    def test_cohere_prefix_resolves(self):
+        """cohere:... prefix sets COHERE integration and model id without prefix."""
+        cfg = EncoderConfig(encoder_identifier="cohere:embed-english-v3.0")
+        assert cfg.encoder_identifier == "embed-english-v3.0"
+        assert cfg.encoder_integration == EncoderIntegration.COHERE
+
+    def test_voyage_prefix_resolves(self):
+        """voyage:... prefix sets VOYAGE integration and model id without prefix."""
+        cfg = EncoderConfig(encoder_identifier="voyage:voyage-3")
+        assert cfg.encoder_identifier == "voyage-3"
+        assert cfg.encoder_integration == EncoderIntegration.VOYAGE
 
     def test_trainable_encoder_false(self):
         """EncoderConfig with trainable_encoder=False."""
