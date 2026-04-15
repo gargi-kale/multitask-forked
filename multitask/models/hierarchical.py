@@ -8,6 +8,7 @@ import copy
 import tensorflow as tf
 from typing import Optional, Union, Dict, List, Any, Tuple
 from multitask.config import ModelConfig, EncoderConfig, EncoderInputType, EncoderIntegration
+# from multitask.legacy.train_test import loss
 
 
 def _get_api_encoder_classes():
@@ -487,6 +488,12 @@ class MultiTaskModel(tf.keras.Model):
             
             # Compute loss using ONLY the matched architectural tasks
             loss = self._mtl_loss_fn(y, y_pred_filtered)
+            
+        # Track loss for Keras metrics/progress bar
+        for metric in self.metrics:
+            if metric.name == 'loss':
+                metric.update_state(loss)
+                break
 
         # Compute gradients and update weights
         gradients = tape.gradient(loss, self.trainable_variables)
@@ -510,7 +517,7 @@ class MultiTaskModel(tf.keras.Model):
                 y_hat_masked  = tf.boolean_mask(y_hat,  mask)
                 metric.update_state(y_true_masked, y_hat_masked)
 
-        return {m.name: m.result() for m in self.metrics}
+        return {'loss': loss, **{m.name: m.result() for m in self.metrics}}
 
     def test_step(self, data):
         """Custom evaluation step to filter out pooled outputs before loss computation."""
@@ -535,7 +542,10 @@ class MultiTaskModel(tf.keras.Model):
 
         # Update metrics manually to support masked labels (ModelConfig.mask_value)
         for metric in self.metrics:
-            if metric.name == 'loss' or metric.name.endswith('_loss'):
+            if metric.name == 'loss':
+                metric.update_state(loss)
+                continue
+            if metric.name.endswith('_loss'):
                 continue
 
             matched_task = next((t for t in task_names if metric.name.startswith(t)), None)
@@ -551,7 +561,7 @@ class MultiTaskModel(tf.keras.Model):
                 y_hat_masked  = tf.boolean_mask(y_hat,  mask)
                 metric.update_state(y_true_masked, y_hat_masked)
         
-        return {m.name: m.result() for m in self.metrics}
+        return {'loss': loss, **{m.name: m.result() for m in self.metrics}}
     
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization."""

@@ -279,17 +279,45 @@ class Trainer:
                     loss_val = tf.square(y_true_flat - y_pred_flat)
                 
                 elif task_type == 'multiclass':
+                    # Masked labels must not be passed to sparse CE (-1 is an
+                    # invalid class index).
+                    # Use a safe dummy class (0) where masked; those positions are
+                    # zeroed by mask.
                     y_true_flat = tf.cast(tf.reshape(y_task_true, [-1]), tf.int32)
-                    loss_val = tf.reshape(tf.keras.losses.sparse_categorical_crossentropy(
-                        y_true_flat, y_task_pred, from_logits=False), [-1])
-                    mask_val = tf.cast(mask_value, y_true_flat.dtype)
-                    mask = tf.cast(tf.not_equal(y_true_flat, mask_val), tf.float32)
+                    mask_val_int = tf.cast(mask_value, y_true_flat.dtype)
+                    mask = tf.cast(tf.not_equal(y_true_flat, mask_val_int),
+                        tf.float32)
+                    safe_labels = tf.where(
+                        tf.equal(y_true_flat, mask_val_int),
+                        tf.zeros_like(y_true_flat),
+                        y_true_flat,
+                    )
+                    loss_val = tf.keras.losses.sparse_categorical_crossentropy(
+                        safe_labels, y_task_pred, from_logits=False
+                    )
+                    loss_val = tf.reshape(loss_val, [-1])
+                    num_classes = self.model.config.get_num_classes_per_task(real_idx)
+                    weights_list = [
+                        float(class_weights[real_idx].get(i, 1.0)) for i in range(num_classes)
+                    ]
+                    weights_map = tf.constant(weights_list, dtype=tf.float32)
+                    sample_class_weights = tf.gather(weights_map, safe_labels)
+                    loss_val = loss_val * sample_class_weights
                 else:
                     y_true_flat = tf.reshape(y_task_true, [-1])
                     y_pred_flat = tf.reshape(y_task_pred, [-1])
-                    loss_val = tf.reshape(tf.keras.losses.binary_crossentropy(y_true_flat, y_pred_flat), [-1])
                     mask_val = tf.cast(mask_value, y_true_flat.dtype)
                     mask = tf.cast(tf.not_equal(y_true_flat, mask_val), tf.float32)
+                    safe_labels = tf.where(
+                        tf.equal(y_true_flat, mask_val),
+                        tf.zeros_like(y_true_flat),
+                        y_true_flat,
+                    )
+                    loss_val = tf.keras.losses.binary_crossentropy(
+                        tf.reshape(safe_labels, [-1, 1]),
+                        tf.reshape(y_pred_flat, [-1, 1]),
+                    )
+                    loss_val = tf.reshape(loss_val, [-1])
                 
                 # Class weighting: skip for regression
                 if task_type == 'regression':
@@ -302,19 +330,7 @@ class Trainer:
                     loss_val = loss_val * sample_weights
                 
                 elif task_type == 'multiclass':
-                    y_task_true = tf.cast(tf.reshape(y_task_true, [-1]), tf.int32)
-                    
-                    loss_val = tf.keras.losses.sparse_categorical_crossentropy(
-                        y_task_true, y_task_pred, from_logits=False
-                    )
-                    num_classes = self.model.config.get_num_classes_per_task(real_idx)
-                    weights_list = [float(class_weights[real_idx].get(i, 1.0))
-                                   for i in range(num_classes)]
-                    weights_map = tf.constant(weights_list, dtype=tf.float32)
-                    
-                    safe_indices = tf.where(y_task_true < 0, 0, y_task_true)
-                    sample_class_weights = tf.gather(weights_map, safe_indices)
-                    loss_val = tf.reshape(loss_val, [-1]) * sample_class_weights
+                    pass
                     
                 else:
                     raise ValueError(f"Unknown task_type: {task_type}")
