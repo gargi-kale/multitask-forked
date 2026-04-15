@@ -279,17 +279,45 @@ class Trainer:
                     loss_val = tf.square(y_true_flat - y_pred_flat)
                 
                 elif task_type == 'multiclass':
+                    # Masked labels must not be passed to sparse CE (-1 is an
+                    # invalid class index).
+                    # Use a safe dummy class (0) where masked; those positions are
+                    # zeroed by mask.
                     y_true_flat = tf.cast(tf.reshape(y_task_true, [-1]), tf.int32)
-                    loss_val = tf.reshape(tf.keras.losses.sparse_categorical_crossentropy(
-                        y_true_flat, y_task_pred, from_logits=False), [-1])
-                    mask_val = tf.cast(mask_value, y_true_flat.dtype)
-                    mask = tf.cast(tf.not_equal(y_true_flat, mask_val), tf.float32)
+                    mask_val_int = tf.cast(mask_value, y_true_flat.dtype)
+                    mask = tf.cast(tf.not_equal(y_true_flat, mask_val_int),
+                        tf.float32)
+                    safe_labels = tf.where(
+                        tf.equal(y_true_flat, mask_val_int),
+                        tf.zeros_like(y_true_flat),
+                        y_true_flat,
+                    )
+                    loss_val = tf.keras.losses.sparse_categorical_crossentropy(
+                        safe_labels, y_task_pred, from_logits=False
+                    )
+                    loss_val = tf.reshape(loss_val, [-1])
+                    num_classes = self.model.config.get_num_classes_per_task(real_idx)
+                    weights_list = [
+                        float(class_weights[real_idx].get(i, 1.0)) for i in range(num_classes)
+                    ]
+                    weights_map = tf.constant(weights_list, dtype=tf.float32)
+                    sample_class_weights = tf.gather(weights_map, safe_labels)
+                    loss_val = loss_val * sample_class_weights
                 else:
                     y_true_flat = tf.reshape(y_task_true, [-1])
                     y_pred_flat = tf.reshape(y_task_pred, [-1])
-                    loss_val = tf.reshape(tf.keras.losses.binary_crossentropy(y_true_flat, y_pred_flat), [-1])
                     mask_val = tf.cast(mask_value, y_true_flat.dtype)
                     mask = tf.cast(tf.not_equal(y_true_flat, mask_val), tf.float32)
+                    safe_labels = tf.where(
+                        tf.equal(y_true_flat, mask_val),
+                        tf.zeros_like(y_true_flat),
+                        y_true_flat,
+                    )
+                    loss_val = tf.keras.losses.binary_crossentropy(
+                        tf.reshape(safe_labels, [-1, 1]),
+                        tf.reshape(y_pred_flat, [-1, 1]),
+                    )
+                    loss_val = tf.reshape(loss_val, [-1])
                 
                 # Class weighting: skip for regression
                 if task_type == 'regression':
@@ -302,28 +330,8 @@ class Trainer:
                     loss_val = loss_val * sample_weights
                 
                 elif task_type == 'multiclass':
-                    y_task_true = tf.cast(tf.reshape(y_task_true, [-1]), tf.int32)
+                    pass
                     
-                    loss_val = tf.keras.losses.sparse_categorical_crossentropy(
-                        y_task_true, y_task_pred, from_logits=False
-                    )
-                    num_classes = self.model.config.get_num_classes_per_task(real_idx)
-                    weights_list = [float(class_weights[real_idx].get(i, 1.0))
-                                   for i in range(num_classes)]
-                    weights_map = tf.constant(weights_list, dtype=tf.float32)
-                    
-                    safe_indices = tf.where(y_task_true < 0, 0, y_task_true)
-                    sample_class_weights = tf.gather(weights_map, safe_indices)
-                    loss_val = tf.reshape(loss_val, [-1]) * sample_class_weights
-                    
-                elif task_type == 'multilabel':
-                    loss_val = tf.keras.losses.binary_crossentropy(y_task_true, y_task_pred)
-                    y_task_true_int = tf.cast(y_task_true, tf.int32)
-                    
-                    w0 = tf.cast(class_weights[real_idx].get(0, 1.0), tf.float32)
-                    w1 = tf.cast(class_weights[real_idx].get(1, 1.0), tf.float32)
-                    sample_weights = tf.where(tf.equal(y_task_true_int, 0), w0, w1)
-                    loss_val = tf.reshape(loss_val * sample_weights, [-1])
                 else:
                     raise ValueError(f"Unknown task_type: {task_type}")
                 
@@ -518,7 +526,7 @@ class Trainer:
         y_true_dict: Dict[str, np.ndarray],
         y_pred_dict: Dict[str, np.ndarray],
         mask_value: Optional[float] = None
-    ) -> Tuple[Dict[str, float], Dict[str, float]] | None:
+    ) -> Tuple[Dict[str, Union[float, List[float], None]], Dict[str, float]]:
         """Find optimal classification thresholds using validation data.
         
         Uses Youden's J statistic (max sensitivity + specificity) to find
@@ -535,8 +543,12 @@ class Trainer:
             
         Returns:
             Tuple of (thresholds_dict, f1_scores_dict)
-            where name -> float for outputs with thresholds, None for multiclass/regression
+            where name -> float for binary, List[float] for multilabel, 
+            None for multiclass/regression
         """
+        if mask_value is None:
+            mask_value = self.mask_value
+            
         thresholds = {}
         f1_scores = {}
         
@@ -553,50 +565,77 @@ class Trainer:
             y_task_true = y_true_dict[name]
             y_task_pred = y_pred_dict[name]
             
-            # For binary/multilabel, flatten to 1D if needed
-            if task_type in ['binary', 'multilabel'] and y_task_pred.ndim > 1:
-                y_task_pred = y_task_pred[:, 0]
-                y_task_true = y_task_true[:, 0] if y_task_true.ndim > 1 else y_task_true
-            
-            # Filter out masked values
-            valid_mask = y_task_true != mask_value
-            y_task_true = y_task_true[valid_mask]
-            y_task_pred = y_task_pred[valid_mask]
-            
-            if len(y_task_true) == 0:
-                # No valid samples for this output
-                thresholds[name] = 0.5
-                f1_scores[name] = 0.0
-                continue
-            
-            if task_type in ('multiclass', 'regression'):
-                # Multiclass uses argmax, regression has no threshold
+            if task_type == 'multiclass':
+                # Multiclass use argmax
                 thresholds[name] = None
                 f1_scores[name] = 0.0
-                continue
             
-            else:
-                # Binary or multilabel: find optimal threshold
-                # For pooled binary labels with 'max' strategy, ground truth
-                # is already 0/1 so roc_curve works directly.
-                # For 'mean' strategy, ground truth may be fractional —
-                # binarize it for roc_curve.
-                y_true_for_roc = y_task_true
-                if self.model.config.is_pool(name):
-                    # Binarize fractional pooled labels for ROC computation
-                    y_true_for_roc = (y_task_true > 0).astype(int)
+            elif task_type == 'regression':
+                thresholds[name] = None
+                f1_scores[name] = None
+                continue
+
+            elif task_type == 'binary':
+                if y_task_pred.ndim > 1:
+                    y_task_pred = y_task_pred[:, 0]
+                    y_task_true = y_task_true[:, 0] if y_task_true.ndim > 1 else y_task_true
                 
-                fpr, tpr, thresh = roc_curve(y_true_for_roc, y_task_pred)
-                j_scores = tpr - fpr
-                optimal_idx = np.argmax(j_scores)
-                optimal_threshold = thresh[optimal_idx]
+                valid_mask = y_task_true != mask_value
+                y_task_true_valid = y_task_true[valid_mask]
+                y_task_pred_valid = y_task_pred[valid_mask]
                 
-                # Calculate F1 with optimal threshold
-                y_task_pred_binary = (y_task_pred > optimal_threshold).astype(int)
-                f1 = f1_score(y_true_for_roc, y_task_pred_binary, average='weighted', zero_division=0)
+                if len(y_task_true_valid) == 0:
+                    thresholds[name] = 0.5
+                    f1_scores[name] = 0.0
+                    continue
                 
+                if len(np.unique(y_task_true_valid)) < 2:
+                    thresholds[name] = 0.5
+                    f1_scores[name] = 0.0
+                    continue
+                    
+                fpr, tpr, thresh = roc_curve(y_task_true_valid, y_task_pred_valid)
+                optimal_threshold = thresh[np.argmax(tpr - fpr)]
+                
+                y_pred_binary = (y_task_pred_valid > optimal_threshold).astype(int)
                 thresholds[name] = float(optimal_threshold)
-                f1_scores[name] = float(f1)
+                f1_scores[name] = float(f1_score(y_task_true_valid, y_pred_binary, average='weighted', zero_division=0))
+
+            elif task_type == 'multilabel':
+                num_labels = y_task_pred.shape[1]
+                label_thresholds = []
+                label_f1s = []
+                
+                for col_idx in range(num_labels):
+                    y_col_true = y_task_true[:, col_idx] if y_task_true.ndim > 1 else y_task_true
+                    y_col_pred = y_task_pred[:, col_idx]
+                    
+                    valid_mask = y_col_true != mask_value
+                    y_col_true_valid = y_col_true[valid_mask]
+                    y_col_pred_valid = y_col_pred[valid_mask]
+                    
+                    if len(y_col_true_valid) == 0:
+                        label_thresholds.append(0.5)
+                        label_f1s.append(0.0)
+                        continue
+                    
+                    if len(np.unique(y_col_true_valid)) < 2:
+                        label_thresholds.append(0.5)
+                        label_f1s.append(0.0)
+                        continue
+                        
+                    fpr, tpr, thresh = roc_curve(y_col_true_valid, y_col_pred_valid)
+                    opt_thresh = thresh[np.argmax(tpr - fpr)]
+                    
+                    y_col_binary = (y_col_pred_valid > opt_thresh).astype(int)
+                    f1 = f1_score(y_col_true_valid, y_col_binary, average='binary', zero_division=0)
+                    
+                    label_thresholds.append(float(opt_thresh))
+                    label_f1s.append(float(f1))
+                
+                # Store the entire array of thresholds for multilabel tasks
+                thresholds[name] = label_thresholds
+                f1_scores[name] = float(np.mean(label_f1s))
         
         return thresholds, f1_scores
     
@@ -981,17 +1020,22 @@ class Trainer:
                     task_type = self.model.config.get_task_type(real_idx)
                     if task_type in ('multiclass', 'regression'):
                         self.optimal_thresholds[task_name] = None
-                    else:
-                        # Binary or multilabel: use 0.5 as default
+                    elif task_type == 'binary':
                         self.optimal_thresholds[task_name] = 0.5
+                    elif task_type == 'multilabel':
+                        num_labels = self.model.config.get_num_classes_per_task(real_idx)
+                        self.optimal_thresholds[task_name] = [0.5] * num_labels
                 
                 # Add default thresholds for pools
                 for pool_name in self.model.config.pool_names:
                     pool_type = self.model.config.get_pool_task_type(pool_name)
-                    if pool_type == 'multiclass':
+                    if pool_type in ('multiclass', 'regression'):
                         self.optimal_thresholds[pool_name] = None
-                    else:
+                    elif pool_type == 'binary':
                         self.optimal_thresholds[pool_name] = 0.5
+                    elif pool_type == 'multilabel':
+                        num_labels = self.model.config.get_pool_num_classes(pool_name)
+                        self.optimal_thresholds[pool_name] = [0.5] * num_labels
             
             # Always return tuple for consistency
             return self.history, self.optimal_thresholds
@@ -999,7 +1043,7 @@ class Trainer:
     def evaluate(
         self,
         dataset: tf.data.Dataset,
-        thresholds: Optional[Dict[str, Optional[float]]] = None,
+        thresholds: Optional[Dict[str, Union[float, List[float], None]]] = None,
         metrics: Optional[List[str]] = None,
         mask_value: Optional[float] = None
     ) -> Dict[str, Any]:
@@ -1104,13 +1148,20 @@ class Trainer:
                     task_type = self.model.config.get_task_type(task_idx)
                 
                 if task_type == 'regression':
-                    # Regression: no binarization, store raw predictions
+                    # Regression: store raw predictions
                     y_pred_binary_dict[name] = y_pred_dict[name].ravel()
                 elif task_type == 'multiclass':
                     y_pred_binary_dict[name] = np.argmax(y_pred_dict[name], axis=1)
-                else:
+                elif task_type == 'binary':
                     threshold = use_thresholds.get(name, 0.5)
                     y_pred_binary_dict[name] = (y_pred_dict[name][:, 0] > threshold).astype(int)
+                elif task_type == 'multilabel':
+                    thresholds_list = use_thresholds.get(name, 0.5)
+                    if isinstance(thresholds_list, (float, int)):
+                        y_pred_binary_dict[name] = (y_pred_dict[name] > thresholds_list).astype(int)
+                    else:
+                        thresh_array = np.array(thresholds_list)
+                        y_pred_binary_dict[name] = (y_pred_dict[name] > thresh_array).astype(int)
         
         # ------------------------------------------------------------------
         # Compute metrics per output (tasks and pools)
@@ -1200,14 +1251,18 @@ class Trainer:
             y_out_true_binary = y_out_true_valid
             if is_pool and task_type != 'multiclass':
                 y_out_true_binary = (y_out_true_valid > 0).astype(int)
-                if y_out_true_binary.ndim > 1:
+                if task_type == 'binary' and y_out_true_binary.ndim > 1:
                     y_out_true_binary = y_out_true_binary[:, 0]
             elif y_out_true_valid.ndim > 1:
-                y_out_true_binary = y_out_true_valid[:, 0]
+                if task_type == 'binary':
+                    y_out_true_binary = y_out_true_valid[:, 0]
+                else:
+                    y_out_true_binary = y_out_true_valid # Keep 2D for multilabel
             
             # Compute binary metrics if thresholds available
             if use_thresholds is not None and task_type not in ('multiclass', 'regression'):
                 y_out_pred_binary = y_pred_binary_dict[name][valid_mask]
+                avg_method = 'binary' if task_type == 'binary' else 'weighted'
                 
                 if 'accuracy' in metrics:
                     acc = accuracy_score(y_out_true_binary, y_out_pred_binary)
@@ -1216,19 +1271,19 @@ class Trainer:
                         overall_clf_metrics['accuracy'].append(acc)
                 
                 if 'precision' in metrics:
-                    prec = precision_score(y_out_true_binary, y_out_pred_binary, zero_division=0)
+                    prec = precision_score(y_out_true_binary, y_out_pred_binary, average=avg_method, zero_division=0)
                     output_results['precision'] = float(prec)
                     if not is_pool:
                         overall_clf_metrics['precision'].append(prec)
                 
                 if 'recall' in metrics:
-                    rec = recall_score(y_out_true_binary, y_out_pred_binary, zero_division=0)
+                    rec = recall_score(y_out_true_binary, y_out_pred_binary, average=avg_method, zero_division=0)
                     output_results['recall'] = float(rec)
                     if not is_pool:
                         overall_clf_metrics['recall'].append(rec)
                 
                 if 'f1' in metrics:
-                    f1 = f1_score(y_out_true_binary, y_out_pred_binary, zero_division=0)
+                    f1 = f1_score(y_out_true_binary, y_out_pred_binary, average=avg_method, zero_division=0)
                     output_results['f1'] = float(f1)
                     if not is_pool:
                         overall_clf_metrics['f1'].append(f1)
@@ -1251,8 +1306,9 @@ class Trainer:
             # Compute probability-based metrics
             if 'auc' in metrics and task_type in ['binary', 'multilabel']:
                 try:
-                    y_probs_for_auc = y_out_pred_probs_valid[:, 0] if y_out_pred_probs_valid.ndim > 1 else y_out_pred_probs_valid
-                    auc = roc_auc_score(y_out_true_binary, y_probs_for_auc)
+                    y_probs_for_auc = y_out_pred_probs_valid[:, 0] if task_type == 'binary' and y_out_pred_probs_valid.ndim > 1 else y_out_pred_probs_valid
+                    avg_auc = 'macro' if task_type == 'multilabel' else 'macro' # sklearn requires macro/weighted for multilabel ROC
+                    auc = roc_auc_score(y_out_true_binary, y_probs_for_auc, average=avg_auc)
                     output_results['auc'] = float(auc)
                     if not is_pool:
                         overall_clf_metrics['auc'].append(auc)
@@ -1261,8 +1317,9 @@ class Trainer:
             
             if 'average_precision' in metrics and task_type in ['binary', 'multilabel']:
                 try:
-                    y_probs_for_ap = y_out_pred_probs_valid[:, 0] if y_out_pred_probs_valid.ndim > 1 else y_out_pred_probs_valid
-                    ap = average_precision_score(y_out_true_binary, y_probs_for_ap)
+                    y_probs_for_ap = y_out_pred_probs_valid[:, 0] if task_type == 'binary' and y_out_pred_probs_valid.ndim > 1 else y_out_pred_probs_valid
+                    avg_ap = 'macro' if task_type == 'multilabel' else 'macro'
+                    ap = average_precision_score(y_out_true_binary, y_probs_for_ap, average=avg_ap)
                     output_results['average_precision'] = float(ap)
                     if not is_pool:
                         overall_clf_metrics['average_precision'].append(ap)
@@ -1346,7 +1403,7 @@ class Trainer:
     def save_checkpoint(
         self,
         filepath: str,
-        thresholds: Optional[Dict[str, Optional[float]]] = None,
+        thresholds: Optional[Dict[str, Union[float, List[float], None]]] = None,
         save_format: str = 'tf',
         save_optimizer: bool = True
     ) -> None:
@@ -1426,7 +1483,7 @@ class Trainer:
         custom_objects: Optional[dict] = None,
         load_optimizer: bool = True,
         compile_model: bool = False
-    ) -> Tuple['Trainer', Optional[Dict[str, Optional[float]]]]:
+    ) -> Tuple['Trainer', Optional[Dict[str, Union[float, List[float], None]]]]:
         """Load a complete training checkpoint.
         
         Restores a Trainer instance with model and training state from a saved checkpoint.
