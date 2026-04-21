@@ -285,7 +285,7 @@ Verify that errors are raised promptly with descriptive messages (not silent fai
 
 Goal: verify end-to-end pipelines on actual data and inspect accuracy metrics.
 
-For all experiments: use pre-computed embeddings from an API encoder (recommended: `openai:text-embedding-3-small` or `sentence-transformers/all-MiniLM-L6-v2` via HuggingFace Inference API) or a lightweight HuggingFace model (e.g., `distilbert-base-uncased`). Train for a meaningful number of epochs (e.g., 10–20 with early stopping). Report metrics from `trainer.evaluate()`.
+For all experiments: use a lightweight HuggingFace model (e.g., `distilbert-base-uncased`). Train for a meaningful number of epochs (e.g., 10–20 with early stopping). Make sure output and fine-tuning are working. Report metrics from `trainer.evaluate()`. Test on Midway cluster.
 
 ### 4.1 Fallacy Detection (`data/fallacy_*.csv`)
 
