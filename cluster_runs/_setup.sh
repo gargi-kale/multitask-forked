@@ -16,6 +16,19 @@ _SETUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 
 # ACTIVATE CONDA ENV
+# This cluster requires the legacy `source activate <env>` pattern, which
+# needs the `activate` script on PATH. `module load` often doesn't do that,
+# so we locate conda's base and prepend its bin/ ourselves.
+_CONDA_BASE="${CONDA_BASE:-$(conda info --base 2>/dev/null || true)}"
+if [[ -z "${_CONDA_BASE}" || ! -x "${_CONDA_BASE}/bin/activate" ]]; then
+    echo "ERROR: could not locate conda's 'activate' script." >&2
+    echo "       Set CONDA_BASE to your conda root (the dir containing bin/activate)," >&2
+    echo "       or 'module load' conda before sourcing this file." >&2
+    exit 1
+fi
+export PATH="${_CONDA_BASE}/bin:${PATH}"
+
+# shellcheck disable=SC1091
 source activate multitask
 echo "Active env: ${CONDA_DEFAULT_ENV:-<none>}"
 echo "which python: $(command -v python || echo 'not found')"
