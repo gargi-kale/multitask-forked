@@ -16,6 +16,11 @@
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=jgint@rcc.uchicago.edu
 
-source "$(dirname "$0")/_setup.sh"
+# Slurm copies this script to a spool dir, so `$(dirname "$0")` is useless.
+# Locate _setup.sh relative to $SLURM_SUBMIT_DIR (supports submission from
+# the repo root OR from cluster_runs/).
+for _d in "$SLURM_SUBMIT_DIR/cluster_runs" "$SLURM_SUBMIT_DIR"; do
+    if [[ -f "$_d/_setup.sh" ]]; then source "$_d/_setup.sh"; break; fi
+done
 
-pytest -v -s tests/test_no_prop_overlap.py::test_propaganda
+python -m pytest -v -s tests/test_no_prop_overlap.py::test_propaganda
