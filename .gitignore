@@ -166,4 +166,17 @@ tfhub_cache/
 
 # Test scripts
 local_test_runs/
-cluster_runs/
+# cluster_runs/
+
+# Local testing output
+# Written by model.save('test_model'). This is the saved model (architecture + 
+# weights + config.json) for load_model('test_model')
+tests_checkpoint/ 
+
+# Written by trainer.save_checkpoint('test_checkpoint', thresholds). This is a
+# trainer checkpoint (training-related state, including optimized thresholds)
+# for Trainer.load_checkpoint('test_checkpoint')
+tests_model/
+
+# Caches
+.embedding_cache
