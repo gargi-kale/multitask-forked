@@ -22,6 +22,16 @@ fi
 source "${_conda_sh}"
 conda activate multitask
 
+# After activation, drop the RCC Python module if present to avoid its runtime
+# libraries shadowing conda's toolchain.
+if type module >/dev/null 2>&1; then
+  module unload python >/dev/null 2>&1 || true
+fi
+
+# RCC's `module load python` can inject an older libstdc++ path that breaks
+# SciPy/scikit-learn C++ extensions in this conda env. Keep conda's libs first.
+export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+
 if ! python -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
   echo "ERROR: Python 3.11+ required; got $(python -V 2>&1) at $(command -v python). Recreate env: conda env remove -n multitask && conda env create -f environment.yml" >&2
   exit 1

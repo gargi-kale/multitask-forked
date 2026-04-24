@@ -52,4 +52,10 @@ cd "${_repo_root}"
 export PYTHONPATH="${_repo_root}:${PYTHONPATH:-}"
 
 export USE_TORCH=0
+
+echo "python=$(which python)"
+python -V
+echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+python -c "import scipy, sklearn; print('ok', scipy.__version__)"
+
 python tests/test_no_prop_overlap.py propaganda
