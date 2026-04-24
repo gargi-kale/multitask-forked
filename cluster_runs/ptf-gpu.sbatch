@@ -18,7 +18,7 @@
 
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
-# LOAD MODULES (Python + CUDA/cuDNN for PyTorch GPU)
+# LOAD MODULES (Python + CUDA/cuDNN for GPU jobs)
 module load python
 module load cuda/12.2
 module load cudnn
@@ -27,8 +27,20 @@ export XLA_FLAGS="--xla_gpu_cuda_data_dir=/software/cuda-12.2-el8-x86_64"
 nvidia-smi
 nvcc --version
 
-# ACTIVATE CONDA ENV
-source activate multitask
+# ACTIVATE CONDA ENV via shared setup
+_setup_sourced=
+for _d in "$SLURM_SUBMIT_DIR/cluster_runs" "$SLURM_SUBMIT_DIR"; do
+    if [[ -f "$_d/_setup.sh" ]]; then
+        # shellcheck source=/dev/null
+        source "$_d/_setup.sh"
+        _setup_sourced=1
+        break
+    fi
+done
+if [[ -z "${_setup_sourced:-}" ]]; then
+    echo "ERROR: cluster_runs/_setup.sh not found under SLURM_SUBMIT_DIR." >&2
+    exit 1
+fi
 
 # Checking XLA_FLAGS
 echo "XLA_FLAGS=$XLA_FLAGS"
