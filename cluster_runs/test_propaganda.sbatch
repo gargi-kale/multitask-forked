@@ -40,4 +40,16 @@ if [[ -z "${_setup_sourced:-}" ]]; then
     exit 1
 fi
 
+_repo_root="$SLURM_SUBMIT_DIR"
+if [[ ! -f "${_repo_root}/tests/test_no_prop_overlap.py" && -f "${_repo_root}/multitask/tests/test_no_prop_overlap.py" ]]; then
+    _repo_root="${_repo_root}/multitask"
+fi
+if [[ ! -f "${_repo_root}/tests/test_no_prop_overlap.py" ]]; then
+    echo "ERROR: cannot locate tests/test_no_prop_overlap.py from SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR}." >&2
+    exit 1
+fi
+cd "${_repo_root}"
+export PYTHONPATH="${_repo_root}:${PYTHONPATH:-}"
+
+export USE_TORCH=0
 python tests/test_no_prop_overlap.py propaganda
