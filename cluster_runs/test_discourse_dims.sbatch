@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=nopo-discourse-dims
-#SBATCH --output=nopo-discourse-dims.out
-#SBATCH --error=nopo-discourse-dims.err
+#SBATCH --output=cluster_runs/outputs/%x-%j.bootstrap.out
+#SBATCH --error=cluster_runs/outputs/%x-%j.bootstrap.err
 
 #SBATCH --account=ssd
 #SBATCH --partition=ssd-gpu
@@ -16,6 +16,20 @@
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=jgint@rcc.uchicago.edu
 
+_repo_root="$SLURM_SUBMIT_DIR"
+if [[ ! -f "${_repo_root}/tests/test_no_prop_overlap.py" && -f "${_repo_root}/multitask/tests/test_no_prop_overlap.py" ]]; then
+    _repo_root="${_repo_root}/multitask"
+fi
+if [[ ! -f "${_repo_root}/tests/test_no_prop_overlap.py" ]]; then
+    echo "ERROR: cannot locate tests/test_no_prop_overlap.py from SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR}." >&2
+    exit 1
+fi
+_outputs_dir="${_repo_root}/cluster_runs/outputs"
+mkdir -p "${_outputs_dir}"
+_job_start_ts="$(date '+%Y%m%d-%H%M%S')"
+_job_log_base="${SLURM_JOB_NAME:-job}-${_job_start_ts}"
+exec >"${_outputs_dir}/${_job_log_base}.out" 2>"${_outputs_dir}/${_job_log_base}.err"
+
 module load python
 module load cuda/12.2
 module load cudnn
@@ -28,7 +42,7 @@ nvcc --version
 # Locate _setup.sh relative to $SLURM_SUBMIT_DIR (supports submission from
 # the repo root OR from cluster_runs/).
 _setup_sourced=
-for _d in "$SLURM_SUBMIT_DIR/cluster_runs" "$SLURM_SUBMIT_DIR"; do
+for _d in "$_repo_root/cluster_runs" "$_repo_root"; do
     if [[ -f "$_d/_setup.sh" ]]; then
         # shellcheck source=/dev/null
         source "$_d/_setup.sh"
@@ -41,14 +55,6 @@ if [[ -z "${_setup_sourced:-}" ]]; then
     exit 1
 fi
 
-_repo_root="$SLURM_SUBMIT_DIR"
-if [[ ! -f "${_repo_root}/tests/test_no_prop_overlap.py" && -f "${_repo_root}/multitask/tests/test_no_prop_overlap.py" ]]; then
-    _repo_root="${_repo_root}/multitask"
-fi
-if [[ ! -f "${_repo_root}/tests/test_no_prop_overlap.py" ]]; then
-    echo "ERROR: cannot locate tests/test_no_prop_overlap.py from SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR}." >&2
-    exit 1
-fi
 cd "${_repo_root}"
 export PYTHONPATH="${_repo_root}:${PYTHONPATH:-}"
 

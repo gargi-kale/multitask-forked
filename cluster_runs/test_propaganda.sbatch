@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=nopo-propaganda
-#SBATCH --output=nopo-propaganda.out
-#SBATCH --error=nopo-propaganda.err
+#SBATCH --output=cluster_runs/outputs/%x-%j.bootstrap.out
+#SBATCH --error=cluster_runs/outputs/%x-%j.bootstrap.err
 
 #SBATCH --account=ssd
 #SBATCH --partition=ssd-gpu
@@ -16,6 +16,20 @@
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=jgint@rcc.uchicago.edu
 
+_repo_root="$SLURM_SUBMIT_DIR"
+if [[ ! -f "${_repo_root}/tests/test_no_prop_overlap.py" && -f "${_repo_root}/multitask/tests/test_no_prop_overlap.py" ]]; then
+    _repo_root="${_repo_root}/multitask"
+fi
+if [[ ! -f "${_repo_root}/tests/test_no_prop_overlap.py" ]]; then
+    echo "ERROR: cannot locate tests/test_no_prop_overlap.py from SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR}." >&2
+    exit 1
+fi
+_outputs_dir="${_repo_root}/cluster_runs/outputs"
+mkdir -p "${_outputs_dir}"
+_job_start_ts="$(date '+%Y%m%d-%H%M%S')"
+_job_log_base="${SLURM_JOB_NAME:-job}-${_job_start_ts}"
+exec >"${_outputs_dir}/${_job_log_base}.out" 2>"${_outputs_dir}/${_job_log_base}.err"
+
 # RCC: conda needs the python module here; cluster_runs/_setup.sh then conda activates
 # multitask so `python` is 3.11+ from the env (module python is only 3.9).
 module load python
@@ -27,7 +41,7 @@ nvidia-smi
 nvcc --version
 
 _setup_sourced=
-for _d in "$SLURM_SUBMIT_DIR/cluster_runs" "$SLURM_SUBMIT_DIR"; do
+for _d in "$_repo_root/cluster_runs" "$_repo_root"; do
     if [[ -f "$_d/_setup.sh" ]]; then
         # shellcheck source=/dev/null
         source "$_d/_setup.sh"
@@ -40,22 +54,9 @@ if [[ -z "${_setup_sourced:-}" ]]; then
     exit 1
 fi
 
-_repo_root="$SLURM_SUBMIT_DIR"
-if [[ ! -f "${_repo_root}/tests/test_no_prop_overlap.py" && -f "${_repo_root}/multitask/tests/test_no_prop_overlap.py" ]]; then
-    _repo_root="${_repo_root}/multitask"
-fi
-if [[ ! -f "${_repo_root}/tests/test_no_prop_overlap.py" ]]; then
-    echo "ERROR: cannot locate tests/test_no_prop_overlap.py from SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR}." >&2
-    exit 1
-fi
 cd "${_repo_root}"
 export PYTHONPATH="${_repo_root}:${PYTHONPATH:-}"
 
 export USE_TORCH=0
-
-echo "python=$(which python)"
-python -V
-echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
-python -c "import scipy, sklearn; print('ok', scipy.__version__)"
 
 python tests/test_no_prop_overlap.py propaganda
