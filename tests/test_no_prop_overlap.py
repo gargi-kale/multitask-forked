@@ -1,5 +1,5 @@
 """
-End-to-end real-world tests on the ``data/no_prop_overlap_*.csv`` datasets.
+End-to-end real-world experiments on the ``data/no_prop_overlap_*.csv`` datasets.
 
 Dataset (see ``testing.md`` §4.3 and ``docs/DATA_FORMAT.md``):
 - ``text``: input sentence / snippet.
@@ -14,32 +14,48 @@ Dataset (see ``testing.md`` §4.3 and ``docs/DATA_FORMAT.md``):
 - ``NA`` entries mean "annotation doesn't apply" and are converted to
   ``mask_value=-1.0`` so the trainer masks them out of the loss.
 
-For all experiments: use a lightweight HuggingFace model (e.g.
-``distilbert-base-uncased``). Start with a small hierarchy, train 10–20 epochs
-with early stopping, and report metrics from ``trainer.evaluate()``. Intended
-to run on Midway.
+Usage:
+    python tests/test_no_prop_overlap.py <experiment> [options]
+
+Experiments:
+    propaganda          Propaganda techniques only (multilabel, 18-class head)
+    discourse_dims      Discourse dimensions only (regression)
+    discourse_binary    Binary discourse dimensions
+    all_task_types      All task types combined
+    output_pooling      Output pooling on propaganda (not yet implemented)
+    all                 Run all experiments in sequence
+
+Options:
+    --data-dir DIR          Path to data directory (default: data)
+    --epochs N              Training epochs (default: 10)
+    --batch-size N          Batch size (default: 128)
+    --learning-rate LR      Learning rate (default: 4e-5)
+    --no-optimize-thresh    Disable threshold optimization
+    --verbose N             Keras verbosity 0/1/2 (default: 1)
+    --encoder {distilbert,tfhub-bert}
+                            Encoder config to use (default: distilbert)
 """
 
 from __future__ import annotations
 
+import argparse
+import sys
 from typing import Any, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
-import pytest
 import tensorflow as tf
 from transformers import AutoTokenizer
 
-# Mixed precision gives ~1.5-2x speedup on modern GPUs (A100/V100).
-# Weights/optimizer state stay fp32; activations compute in fp16. Safe for BERT.
-# No-op on CPU-only machines.
-tf.keras.mixed_precision.set_global_policy("mixed_float16")
+# NOTE: mixed_float16 makes model outputs float16, which breaks the trainer's
+# loss arithmetic (float16 * float32 Mul dtype mismatch in dict_weighted_masked_loss).
+# Keeping float32 globally avoids that without changing the trainer.
+tf.keras.mixed_precision.set_global_policy("float32")
 
 from multitask.config import (
     ModelConfig, EncoderConfig, TrainingConfig,
-    EncoderIntegration, EncoderInputType
+    EncoderIntegration, EncoderInputType,
 )
-
 from multitask import MultiTaskModel, Trainer
 
 # ---------------------------------------------------------------------------
@@ -65,11 +81,29 @@ DISCOURSE_BINARY_COLUMNS: Tuple[str, ...] = tuple(
     f"{c}_bi" for c in DISCOURSE_REGRESSION_COLUMNS
 )
 
-ALL_COLUMNS = (
-    list(PROPAGANDA_TECHNIQUE_COLUMNS) 
-    + list(DISCOURSE_REGRESSION_COLUMNS) 
-    + list(DISCOURSE_BINARY_COLUMNS)
+
+# ---------------------------------------------------------------------------
+# Encoder configs
+# ---------------------------------------------------------------------------
+
+ecfg_distilbert_uncased = EncoderConfig(
+    encoder_identifier="distilbert-base-uncased",
+    encoder_input_type=EncoderInputType.HUGGINGFACE_TOKENS,
+    encoder_integration=EncoderIntegration.HUGGINGFACE,
+    trainable_encoder=True,
 )
+
+ecfg_tfhub_bert = EncoderConfig(
+    encoder_identifier="https://tfhub.dev/tensorflow/bert_en_uncased_L-12_H-768_A-12/4",
+    encoder_input_type=EncoderInputType.TFHUB_TOKENS,
+    encoder_integration=EncoderIntegration.TFHUB,
+    trainable_encoder=True,
+)
+
+ENCODER_CONFIGS = {
+    "distilbert": ecfg_distilbert_uncased,
+    "tfhub-bert": ecfg_tfhub_bert,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -90,36 +124,37 @@ def load_splits(
     mask_value: float = -1.0,
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset, tf.data.Dataset]:
     multilabel_groups = multilabel_groups or {}
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-    
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, use_fast=False)
+
     def _to_float(s: pd.Series) -> np.ndarray:
         s = s.replace(list(na_strings), np.nan)
         vals = pd.to_numeric(s, errors="coerce").to_numpy(dtype=np.float32)
         return np.where(np.isnan(vals), mask_value, vals)
-    
+
     def build(split: str) -> tf.data.Dataset:
         df = pd.read_csv(f"{data_dir}/{prefix}{split}.csv")
         labels: Dict[str, np.ndarray] = {}
-        
+
         for col in label_columns:
             labels[col] = _to_float(df[col])
-        
+
         for name, cols in multilabel_groups.items():
             labels[name] = np.stack([_to_float(df[c]) for c in cols], axis=1)
-        
+
+        texts = ["" if pd.isna(x) else str(x) for x in df[text_column]]
         enc = tokenizer(
-            df[text_column].astype(str).tolist(),
+            texts,
             padding="max_length",
             truncation=True,
             max_length=max_length,
             return_tensors="np",
         )
-        
+
         inputs = {
             "input_ids": enc["input_ids"].astype(np.int32),
             "attention_mask": enc["attention_mask"].astype(np.int32),
         }
-        
+
         ds = tf.data.Dataset.from_tensor_slices((inputs, labels))
         if split == "train":
             ds = ds.shuffle(min(len(df), 1000))
@@ -129,42 +164,8 @@ def load_splits(
 
 
 # ---------------------------------------------------------------------------
-# Skip real-data tests when the CSVs aren't present
-# ---------------------------------------------------------------------------
-
-import os
-
-_DATA_PRESENT = os.path.exists("data/no_prop_overlap_train.csv")
-requires_data = pytest.mark.skipif(
-    not _DATA_PRESENT,
-    reason="no_prop_overlap CSVs not available under data/",
-)
-
-# ---------------------------------------------------------------------------
-# Configs and common vars
-# ---------------------------------------------------------------------------
-
-BATCH_SIZE = 128
-
-ecfg_distilbert_uncased = EncoderConfig(
-    encoder_identifier="distilbert-base-uncased",
-    encoder_input_type=EncoderInputType.HUGGINGFACE_TOKENS,
-    encoder_integration=EncoderIntegration.HUGGINGFACE,
-    trainable_encoder=True,
-)
-
-ecfg_tfhub_bert = EncoderConfig(
-    encoder_identifier="https://tfhub.dev/tensorflow/bert_en_uncased_L-12_H-768_A-12/4",
-    encoder_input_type=EncoderInputType.TFHUB_TOKENS,
-    encoder_integration=EncoderIntegration.TFHUB,
-    trainable_encoder=True
-)
-
-
-# ---------------------------------------------------------------------------
 # Shared train/eval harness
 # ---------------------------------------------------------------------------
-
 
 def run_experiment(
     config: ModelConfig,
@@ -172,21 +173,17 @@ def run_experiment(
     val_ds: tf.data.Dataset,
     *,
     epochs: int = 10,
-    # Canonical BERT fine-tuning LR with sqrt scaling for BATCH_SIZE=128:
-    # 3e-5 at bs=64 -> ~4e-5 at bs=128. 1e-3 diverges when trainable_encoder=True.
+    batch_size: int = 128,
     learning_rate: float = 4e-5,
     optimize_thresholds: bool = True,
     verbose: int = 1,
 ) -> Dict[str, Any]:
-    """Build ``MultiTaskModel`` + ``Trainer`` from ``config``, fit on
-    ``train_ds`` / ``val_ds``, then evaluate. Returns the ``evaluate()`` dict.
-    """
     model = MultiTaskModel(config)
     trainer = Trainer(
         model,
         TrainingConfig(
             epochs=epochs,
-            batch_size=BATCH_SIZE,
+            batch_size=batch_size,
             learning_rate=learning_rate,
         ),
     )
@@ -211,122 +208,175 @@ def run_experiment(
 # Experiments
 # ---------------------------------------------------------------------------
 
-
-@requires_data
-def test_propaganda():
-    """
-    Propaganda techniques only (multilabel, single 18-class head).
-    """
+def run_propaganda(args: argparse.Namespace) -> None:
+    print("\n=== Experiment: propaganda ===")
     cols = list(PROPAGANDA_TECHNIQUE_COLUMNS)
     train_ds, val_ds, _ = load_splits(
         multilabel_groups={"propaganda_techniques": cols},
-        batch_size=BATCH_SIZE,
+        batch_size=args.batch_size,
+        data_dir=args.data_dir,
     )
-
     config = ModelConfig(
         task_structure=[[1]],
         task_names=["propaganda_techniques"],
         task_types=["multilabel"],
         num_classes_per_task=[len(cols)],
-        encoder_config=ecfg_distilbert_uncased,
+        encoder_config=ENCODER_CONFIGS[args.encoder],
+    )
+    run_experiment(
+        config, train_ds, val_ds,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        optimize_thresholds=not args.no_optimize_thresh,
+        verbose=args.verbose,
     )
 
-    results = run_experiment(config, train_ds, val_ds)
-    assert results.get("overall_metrics"), "no metrics returned"
 
-
-@requires_data
-def test_discourse_dims():
-    """
-    Discourse dimensions only (regression). One regression task per continuous
-    discourse column; ``NA`` rows masked (``mask_value=-1.0``); ``mse``,
-    ``mae``, ``r2`` returned per dimension.
-    """
+def run_discourse_dims(args: argparse.Namespace) -> None:
+    print("\n=== Experiment: discourse_dims ===")
     cols = list(DISCOURSE_REGRESSION_COLUMNS)
-    train_ds, val_ds, _ = load_splits(cols, batch_size=BATCH_SIZE)
-
+    train_ds, val_ds, _ = load_splits(cols, batch_size=args.batch_size, data_dir=args.data_dir)
     config = ModelConfig(
         task_structure=[[len(cols)]],
         task_names=cols,
         task_types=["regression"] * len(cols),
         num_classes_per_task=[1] * len(cols),
-        encoder_config=ecfg_distilbert_uncased,
+        encoder_config=ENCODER_CONFIGS[args.encoder],
+    )
+    run_experiment(
+        config, train_ds, val_ds,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        optimize_thresholds=False,
+        verbose=args.verbose,
     )
 
-    # Pure regression -> no thresholds to optimize.
-    results = run_experiment(config, train_ds, val_ds, optimize_thresholds=False)
-    assert results.get("overall_metrics"), "no metrics returned"
 
-
-@requires_data
-def test_discourse_binary():
-    """
-    Binary discourse only. ``*_bi`` columns as binary tasks; accuracy and F1
-    per dimension.
-    """
+def run_discourse_binary(args: argparse.Namespace) -> None:
+    print("\n=== Experiment: discourse_binary ===")
     cols = list(DISCOURSE_BINARY_COLUMNS)
-    train_ds, val_ds, _ = load_splits(cols, batch_size=BATCH_SIZE)
-
+    train_ds, val_ds, _ = load_splits(cols, batch_size=args.batch_size, data_dir=args.data_dir)
     config = ModelConfig(
         task_structure=[[len(cols)]],
         task_names=cols,
         task_types=["binary"] * len(cols),
         num_classes_per_task=[2] * len(cols),
-        encoder_config=ecfg_distilbert_uncased,
+        encoder_config=ENCODER_CONFIGS[args.encoder],
+    )
+    run_experiment(
+        config, train_ds, val_ds,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        optimize_thresholds=not args.no_optimize_thresh,
+        verbose=args.verbose,
     )
 
-    results = run_experiment(config, train_ds, val_ds)
-    assert results.get("overall_metrics"), "no metrics returned"
 
-
-@requires_data
-def test_all_task_types():
-    """
-    All task types together (multilabel propaganda + regression discourse +
-    binary discourse + binary ``propaganda``). Check per-task metrics and
-    ``results['overall_metrics']`` is populated and finite.
-    """
+def run_all_task_types(args: argparse.Namespace) -> None:
+    print("\n=== Experiment: all_task_types ===")
     train_ds, val_ds, _ = load_splits(
         label_columns=list(DISCOURSE_REGRESSION_COLUMNS) + list(DISCOURSE_BINARY_COLUMNS),
         multilabel_groups={"propaganda_techniques": list(PROPAGANDA_TECHNIQUE_COLUMNS)},
-        batch_size=BATCH_SIZE,
+        batch_size=args.batch_size,
+        data_dir=args.data_dir,
     )
-
     task_names = (
         ["propaganda_techniques"]
         + list(DISCOURSE_REGRESSION_COLUMNS)
         + list(DISCOURSE_BINARY_COLUMNS)
     )
-
     task_types = (
         ["multilabel"]
         + ["regression"] * len(DISCOURSE_REGRESSION_COLUMNS)
         + ["binary"] * len(DISCOURSE_BINARY_COLUMNS)
     )
-
     num_classes_per_task = (
         [len(PROPAGANDA_TECHNIQUE_COLUMNS)]
         + [1] * len(DISCOURSE_REGRESSION_COLUMNS)
         + [2] * len(DISCOURSE_BINARY_COLUMNS)
     )
-
     config = ModelConfig(
         task_structure=[[len(task_names)]],
         task_names=task_names,
         task_types=task_types,
         num_classes_per_task=num_classes_per_task,
-        encoder_config=ecfg_distilbert_uncased,
+        encoder_config=ENCODER_CONFIGS[args.encoder],
+    )
+    run_experiment(
+        config, train_ds, val_ds,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        optimize_thresholds=not args.no_optimize_thresh,
+        verbose=args.verbose,
     )
 
-    results = run_experiment(config, train_ds, val_ds)
-    assert results.get("overall_metrics"), "no metrics returned"
+
+def run_output_pooling(args: argparse.Namespace) -> None:
+    print("\n=== Experiment: output_pooling ===")
+    print("Not yet implemented.")
 
 
-@requires_data
-def test_output_pooling():
-    """
-    Output pooling on propaganda: ``output_pools={'any_propaganda': {'tasks':
-    [...18...], 'strategy': 'max'}}``. Compare pool F1 against the standalone
-    ``propaganda`` binary column.
-    """
-    pass
+EXPERIMENTS = {
+    "propaganda": run_propaganda,
+    "discourse_dims": run_discourse_dims,
+    "discourse_binary": run_discourse_binary,
+    "all_task_types": run_all_task_types,
+    "output_pooling": run_output_pooling,
+}
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Run no_prop_overlap experiments.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument(
+        "experiment",
+        choices=list(EXPERIMENTS) + ["all"],
+        help="Which experiment to run (or 'all' to run every experiment in sequence)",
+    )
+    parser.add_argument("--data-dir", default="data", help="Path to data directory")
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--learning-rate", type=float, default=4e-5)
+    parser.add_argument(
+        "--no-optimize-thresh", action="store_true",
+        help="Disable threshold optimization (always off for regression)",
+    )
+    parser.add_argument("--verbose", type=int, default=1, choices=[0, 1, 2])
+    parser.add_argument(
+        "--encoder", default="distilbert", choices=list(ENCODER_CONFIGS),
+        help="Encoder config to use",
+    )
+    return parser
+
+
+def main() -> None:
+    import os
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if not os.path.exists(f"{args.data_dir}/no_prop_overlap_train.csv"):
+        print(
+            f"ERROR: data not found at {args.data_dir}/no_prop_overlap_train.csv\n"
+            "Make sure --data-dir points to the directory containing the no_prop_overlap_*.csv files.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    to_run = list(EXPERIMENTS) if args.experiment == "all" else [args.experiment]
+    for name in to_run:
+        EXPERIMENTS[name](args)
+
+
+if __name__ == "__main__":
+    main()
