@@ -111,6 +111,22 @@ class TestEncoderConfigPersistence:
         assert d["encoder_integration"] is None
         assert d["trainable_encoder"] is True
 
+    def test_init_with_string_enum_fields_converts_to_enum(self):
+        """Regression: string enum-like fields are normalized during init."""
+        cfg = EncoderConfig(
+            encoder_identifier="bert-base-uncased",
+            encoder_input_type="raw_string",
+            encoder_integration="huggingface",
+            trainable_encoder=True,
+        )
+        assert cfg.encoder_input_type == EncoderInputType.RAW_STRING
+        assert cfg.encoder_integration == EncoderIntegration.HUGGINGFACE
+        d = cfg.to_dict_for_save()
+        assert d["encoder_identifier"] == "bert-base-uncased"
+        assert d["encoder_input_type"] == "raw_string"
+        assert d["encoder_integration"] == "huggingface"
+        assert d["trainable_encoder"] is True
+
     def test_from_dict_empty(self):
         """from_dict with empty dict gives default-like EncoderConfig."""
         cfg = EncoderConfig.from_dict({})

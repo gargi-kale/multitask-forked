@@ -120,6 +120,12 @@ class EncoderConfig:
 
     def __post_init__(self):
         """Validate encoder configuration."""
+        if self.encoder_input_type is not None and not isinstance(self.encoder_input_type, EncoderInputType):
+            self.encoder_input_type = EncoderInputType(self.encoder_input_type)
+
+        if self.encoder_integration is not None and not isinstance(self.encoder_integration, EncoderIntegration):
+            self.encoder_integration = EncoderIntegration(self.encoder_integration)
+
         if self.encoder is not None:
             if not _is_keras_layer(self.encoder):
                 raise ValueError("Custom encoder must be a Keras Layer.")
