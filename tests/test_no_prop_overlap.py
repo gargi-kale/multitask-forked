@@ -184,7 +184,7 @@ def run_experiment(
     learning_rate: float = 4e-5,
     optimize_thresholds: bool = True,
     verbose: int = 1,
-    show_structure: bool = False,
+    show_structure: bool = True,
 ) -> Dict[str, Any]:
     model = MultiTaskModel(config)
     if show_structure:
@@ -494,10 +494,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--verbose", type=int, default=1, choices=[0, 1, 2])
     parser.add_argument(
-        "--show-structure",
-        action="store_true",
-        help="Print summary_tree() and task paths before training",
+        "--no-show-structure",
+        action="store_false",
+        dest="show_structure",
+        help="Disable summary_tree() and task path printing",
     )
+    parser.set_defaults(show_structure=True)
     parser.add_argument(
         "--encoder", default="distilbert", choices=list(ENCODER_CONFIGS),
         help="Encoder config to use",
