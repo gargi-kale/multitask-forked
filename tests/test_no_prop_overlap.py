@@ -21,7 +21,12 @@ Experiments:
     propaganda          Propaganda techniques only (multilabel, 18-class head)
     discourse_dims      Discourse dimensions only (regression)
     discourse_binary    Binary discourse dimensions
+    propaganda_binary   Propaganda techniques + binary discourse dimensions
     all_task_types      All task types combined
+    all_task_types_grouped
+                        All task types with grouped hierarchy by task family
+    all_task_types_deep_grouped
+                        All task types with deep hierarchy (all -> some -> tasks)
     output_pooling      Output pooling on propaganda (not yet implemented)
     all                 Run all experiments in sequence
 
@@ -275,8 +280,40 @@ def run_discourse_binary(args: argparse.Namespace) -> None:
     )
 
 
-def run_all_task_types(args: argparse.Namespace) -> None:
-    print("\n=== Experiment: all_task_types ===")
+def run_propaganda_binary(args: argparse.Namespace) -> None:
+    print("\n=== Experiment: propaganda_binary ===")
+    binary_cols = list(DISCOURSE_BINARY_COLUMNS)
+    train_ds, val_ds, _ = load_splits(
+        label_columns=binary_cols,
+        multilabel_groups={"propaganda_techniques": list(PROPAGANDA_TECHNIQUE_COLUMNS)},
+        batch_size=args.batch_size,
+        data_dir=args.data_dir,
+    )
+    task_names = ["propaganda_techniques"] + binary_cols
+    task_types = ["multilabel"] + ["binary"] * len(binary_cols)
+    num_classes_per_task = [len(PROPAGANDA_TECHNIQUE_COLUMNS)] + [2] * len(binary_cols)
+    config = ModelConfig(
+        task_structure=[[len(task_names)]],
+        task_names=task_names,
+        task_types=task_types,
+        num_classes_per_task=num_classes_per_task,
+        encoder_config=ENCODER_CONFIGS[args.encoder],
+    )
+    run_experiment(
+        config, train_ds, val_ds,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        optimize_thresholds=not args.no_optimize_thresh,
+        verbose=args.verbose,
+    )
+
+
+def _prepare_all_task_types_data_and_config(
+    args: argparse.Namespace,
+    *,
+    task_structure: Sequence[Sequence[int]],
+) -> Tuple[tf.data.Dataset, tf.data.Dataset, ModelConfig]:
     train_ds, val_ds, _ = load_splits(
         label_columns=list(DISCOURSE_REGRESSION_COLUMNS) + list(DISCOURSE_BINARY_COLUMNS),
         multilabel_groups={"propaganda_techniques": list(PROPAGANDA_TECHNIQUE_COLUMNS)},
@@ -299,11 +336,56 @@ def run_all_task_types(args: argparse.Namespace) -> None:
         + [2] * len(DISCOURSE_BINARY_COLUMNS)
     )
     config = ModelConfig(
-        task_structure=[[len(task_names)]],
+        task_structure=[list(level) for level in task_structure],
         task_names=task_names,
         task_types=task_types,
         num_classes_per_task=num_classes_per_task,
         encoder_config=ENCODER_CONFIGS[args.encoder],
+    )
+    return train_ds, val_ds, config
+
+
+def run_all_task_types(args: argparse.Namespace) -> None:
+    print("\n=== Experiment: all_task_types ===")
+    train_ds, val_ds, config = _prepare_all_task_types_data_and_config(
+        args,
+        task_structure=[[1 + len(DISCOURSE_REGRESSION_COLUMNS) + len(DISCOURSE_BINARY_COLUMNS)]],
+    )
+    run_experiment(
+        config, train_ds, val_ds,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        optimize_thresholds=not args.no_optimize_thresh,
+        verbose=args.verbose,
+    )
+
+
+def run_all_task_types_grouped(args: argparse.Namespace) -> None:
+    print("\n=== Experiment: all_task_types_grouped ===")
+    train_ds, val_ds, config = _prepare_all_task_types_data_and_config(
+        args,
+        task_structure=[[3], [1, len(DISCOURSE_REGRESSION_COLUMNS), len(DISCOURSE_BINARY_COLUMNS)]],
+    )
+    run_experiment(
+        config, train_ds, val_ds,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        optimize_thresholds=not args.no_optimize_thresh,
+        verbose=args.verbose,
+    )
+
+
+def run_all_task_types_deep_grouped(args: argparse.Namespace) -> None:
+    print("\n=== Experiment: all_task_types_deep_grouped ===")
+    train_ds, val_ds, config = _prepare_all_task_types_data_and_config(
+        args,
+        task_structure=[
+            [2],
+            [1, 2],
+            [1, len(DISCOURSE_REGRESSION_COLUMNS), len(DISCOURSE_BINARY_COLUMNS)],
+        ],
     )
     run_experiment(
         config, train_ds, val_ds,
@@ -324,7 +406,10 @@ EXPERIMENTS = {
     "propaganda": run_propaganda,
     "discourse_dims": run_discourse_dims,
     "discourse_binary": run_discourse_binary,
+    "propaganda_binary": run_propaganda_binary,
     "all_task_types": run_all_task_types,
+    "all_task_types_grouped": run_all_task_types_grouped,
+    "all_task_types_deep_grouped": run_all_task_types_deep_grouped,
     "output_pooling": run_output_pooling,
 }
 

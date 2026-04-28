@@ -329,7 +329,7 @@ For all experiments: use a lightweight HuggingFace model (e.g., `distilbert-base
 | [ ] | **Propaganda techniques only (multilabel):** train on the 18 technique columns | Per-technique F1 and macro F1 on test set; compare with/without class weights; check threshold optimization | — |
 | [ ] | **Discourse dimensions only (regression):** train on continuous discourse columns | MSE/MAE/R² per dimension; masking handles `NA` rows correctly | — |
 | [ ] | **Binary discourse only:** train on `*_bi` columns | Accuracy and F1 per dimension | — |
-| [ ] | **Multi-task: propaganda techniques + binary discourse** (multilabel + binary) | Individual task metrics vs. single-task baselines; masking handles rows where discourse labels are `NA` | — |
+| [ ] | **`propaganda_binary` (multi-task: propaganda techniques + binary discourse):** multilabel + binary | Individual task metrics vs. single-task baselines; masking handles rows where discourse labels are `NA` | — |
 | [ ] | **Multi-task: all task types together** (multilabel propaganda + regression discourse + binary discourse + binary `propaganda` column) | Per-task and overall metrics; `overall_metrics` reasonable | — |
 | [ ] | **Output pooling on propaganda:** pool all 18 technique columns with `strategy='max'` into `any_propaganda` | Compare pool F1 against standalone `propaganda` binary column | — |
 
