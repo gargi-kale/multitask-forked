@@ -25,7 +25,15 @@ Establish single-task and flat-baseline performance before adding hierarchical s
 A single multilabel output head predicts all 18 propaganda techniques with no hierarchical branching. This allows us to isolate the multilabel head to see base signal quality and threshold behavior without cross-task effects.
 
 - Source: `cluster_runs/outputs/nopo-propaganda.out`
+- Structure: `[[1]]` (single multilabel propaganda head)
 - Validation F1 during threshold search: 0.0469
+- Run metadata:
+  - Best epoch: 1
+  - Training stopped at epoch: 4 (early stopping)
+  - Train time: ~474s (~7m54s)
+  - Checkpoint restored: Yes
+  - Thresholding mode: Enabled (validation F1 reported)
+  - Primary takeaway: Simple multilabel baseline; low precision/F1 and weak probability quality (AUC/AP)
 
 | Metric | Value |
 |---|---:|
@@ -48,6 +56,13 @@ Each propaganda technique column is treated as its own binary head (18 heads tot
 - Structure: `[[18]]`
 - Source: `cluster_runs/outputs/nopo-propaganda-cols-binary.out`
 - Validation F1 during threshold search: 0.6496
+- Run metadata:
+  - Best epoch: 1
+  - Training stopped at epoch: 4 (early stopping)
+  - Train time: ~794s (~13m14s)
+  - Checkpoint restored: Yes
+  - Thresholding mode: Enabled (validation F1 reported)
+  - Primary takeaway: Per-technique binary heads improve over multilabel baseline, but aggregate final F1 remains low
 
 | Metric | Value |
 |---|---:|
@@ -67,7 +82,15 @@ Each propaganda technique column is treated as its own binary head (18 heads tot
 Eight independent regression heads are trained in a flat single-level multitask setup. This allows us to measure continuous discourse signal quality and regression fit independently from classification losses.
 
 - Source: `cluster_runs/outputs/nopo-discourse-dims.out`
+- Structure: `[[8]]` (8 regression heads)
 - Validation F1 during threshold search: None (threshold optimization disabled)
+- Run metadata:
+  - Best epoch: 3
+  - Training stopped at epoch: 6 (early stopping)
+  - Train time: ~833s (~13m53s)
+  - Checkpoint restored: Yes
+  - Thresholding mode: Default thresholds (optimization disabled)
+  - Primary takeaway: Best standalone regression-only baseline in this set
 
 | Metric | Value |
 |---|---:|
@@ -87,7 +110,16 @@ Eight independent regression heads are trained in a flat single-level multitask 
 Eight independent binary heads are trained in a flat single-level multitask setup. Benchmark easier classification variants of discourse dimensions and confirm threshold optimization works well.
 
 - Source: `cluster_runs/outputs/nopo-discourse-binary.out`
+- Structure: `[[8]]` (8 binary heads)
 - Validation F1 during threshold search: 0.5265
+- Run metadata:
+  - Best epoch: 1
+  - Training stopped at epoch: 4 (early stopping)
+  - Train time: ~585s (~9m45s)
+  - Checkpoint restored: Yes
+  - Thresholding mode: Enabled (validation F1 reported)
+  - Primary takeaway: Strongest standalone classification metrics (F1/precision/recall)
+
 | Metric | Value |
 |---|---:|
 | Accuracy | 0.5584 |
@@ -109,6 +141,13 @@ All 17 heads (1 propaganda + 8 regression + 8 binary) share the same trunk and s
 - Structure: `[[17]]` (1 propaganda multilabel + 8 regression + 8 binary)
 - Source: `cluster_runs/outputs/nopo-all-task-types.out`
 - Validation F1 during threshold search: 0.4821
+- Run metadata:
+  - Best epoch: 3
+  - Training stopped at epoch: 6
+  - Train time: ~1115s (~18m35s)
+  - Checkpoint restored: Yes
+  - Thresholding mode: Enabled (classification heads), disabled for regression heads
+  - Primary takeaway: Flat multitask baseline for all-task comparisons
 
 | Metric | Value |
 |---|---:|
@@ -134,6 +173,13 @@ All outputs are binary/regression heads: 18 binary propaganda heads + 8 regressi
 - Structure: `[[34]]` (18 propaganda binary + 8 regression + 8 binary discourse)
 - Source: `cluster_runs/outputs/nopo-all-task-types-bin-prop.out`
 - Validation F1 during threshold search: 0.6284
+- Run metadata:
+  - Best epoch: 10
+  - Training stopped at epoch: 10 (full run)
+  - Train time: ~2455s (~40m55s)
+  - Checkpoint restored: Yes
+  - Thresholding mode: Enabled (classification heads), disabled for regression heads
+  - Primary takeaway: Binary propaganda variant of flat all-task baseline
 
 | Metric | Value |
 |---|---:|
@@ -160,6 +206,13 @@ The model first splits into three family branches (propaganda, regression, binar
 - Structure: `[[3], [1, 8, 8]]`
 - Source: `cluster_runs/outputs/nopo-all-task-types-grouped.out`
 - Validation F1 during threshold search: 0.4754
+- Run metadata:
+  - Best epoch: 10
+  - Training stopped at epoch: 10 (full run)
+  - Train time: ~1829s (~30m29s)
+  - Checkpoint restored: Yes
+  - Thresholding mode: Enabled (classification heads), disabled for regression heads
+  - Primary takeaway: Family-grouped hierarchy with best AUC/AP so far
 
 | Metric | Value |
 |---|---:|
@@ -185,6 +238,13 @@ The model branches into three families (propaganda binary, discourse regression,
 - Structure: `[[3], [18, 8, 8]]`
 - Source: `cluster_runs/outputs/nopo-all-task-bin-prop-grouped.out`
 - Validation F1 during threshold search: 0.6335
+- Run metadata:
+  - Best epoch: 10
+  - Training stopped at epoch: 10 (full run)
+  - Train time: ~2134s (~35m34s)
+  - Checkpoint restored: Yes
+  - Thresholding mode: Enabled (classification heads), disabled for regression heads
+  - Primary takeaway: Grouped hierarchy with binary propaganda heads
 
 | Metric | Value |
 |---|---:|
@@ -207,6 +267,13 @@ The model splits into propaganda vs discourse, then discourse splits into regres
 - Structure: `[[2], [1, 2], [1, 8, 8]]`
 - Source: `cluster_runs/outputs/nopo-all-task-types-deep-grouped.out`
 - Validation F1 during threshold search: 0.4991
+- Run metadata:
+  - Best epoch: 1
+  - Training stopped at epoch: 4 (early stopping)
+  - Train time: ~805s (~13m25s)
+  - Checkpoint restored: Yes
+  - Thresholding mode: Enabled (classification heads), disabled for regression heads
+  - Primary takeaway: Deeper hierarchy boosts recall but hurts AUC/AP and regression quality
 
 | Metric | Value |
 |---|---:|
@@ -232,6 +299,13 @@ The model splits into propaganda vs discourse, then discourse splits into regres
 - Structure: `[[2], [1, 2], [18, 8, 8]]`
 - Source: `cluster_runs/outputs/nopo-all-task-bin-prop-deep.out`
 - Validation F1 during threshold search: 0.6001
+- Run metadata:
+  - Best epoch: 10
+  - Training stopped at epoch: 10 (full run)
+  - Train time: ~2128s (~35m28s)
+  - Checkpoint restored: Yes
+  - Thresholding mode: Enabled (classification heads), disabled for regression heads
+  - Primary takeaway: Deep grouped hierarchy with binary propaganda heads
 
 | Metric | Value |
 |---|---:|
@@ -254,6 +328,13 @@ One propaganda branch stays separate while each discourse dimension forms a pair
 - Structure: `[[9], [1, 2, 2, 2, 2, 2, 2, 2, 2]]`
 - Source: `cluster_runs/outputs/nopo-all-task-types-pair-by-dim.out`
 - Validation F1 during threshold search: 0.5312
+- Run metadata:
+  - Best epoch: 1
+  - Training stopped at epoch: 4 (early stopping)
+  - Train time: ~827s (~13m47s)
+  - Checkpoint restored: Yes
+  - Thresholding mode: Enabled (classification heads), disabled for regression heads
+  - Primary takeaway: Strong classification F1, weaker regression performance
 
 | Metric | Value |
 |---|---:|
@@ -279,7 +360,7 @@ One propaganda branch stays separate while each discourse dimension forms a pair
 
 ## Cross-Experiment Summary Table
 
-Legend: `HIGH` marks the highest numeric value in a row, `LOW` marks the lowest numeric value in a row (ignoring `None` and `TBD`).
+Legend: `HIGH` marks the highest numeric value in a row, `LOW` marks the lowest numeric value in a row (ignoring `None`).
 
 | Metric | propaganda | propaganda_cols_binary | discourse_dims | discourse_binary | all_task_types | all_task_types_binary_prop | all_task_types_grouped | all_task_types_binary_prop_grouped | all_task_types_deep_grouped | all_task_types_binary_prop_deep_grouped | all_task_types_pair_by_dimension |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
