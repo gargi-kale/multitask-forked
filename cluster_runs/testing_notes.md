@@ -40,6 +40,28 @@ A single multilabel output head predicts all 18 propaganda techniques with no hi
 | R2 | None |
 | Pearson r | None |
 
+#### Propaganda Columns as Binary Heads
+
+Each propaganda technique column is treated as its own binary head (18 heads total) rather than one multilabel head. This tests whether independent binary losses train more stably than a single multilabel head.
+
+- Experiment key: `propaganda_cols_binary`
+- Structure: `[[18]]`
+- Source: `cluster_runs/outputs/nopo-propaganda-cols-binary.out`
+- Validation F1 during threshold search: 0.6496
+
+| Metric | Value |
+|---|---:|
+| Accuracy | 0.5396 |
+| Precision | 0.0343 |
+| Recall | 0.5175 |
+| F1 | 0.0500 |
+| AUC | 0.5421 |
+| Average Precision | 0.0335 |
+| MSE | None |
+| MAE | None |
+| R2 | None |
+| Pearson r | None |
+
 #### Discourse Regression
 
 Eight independent regression heads are trained in a flat single-level multitask setup. This allows us to measure continuous discourse signal quality and regression fit independently from classification losses.
@@ -104,6 +126,28 @@ All 17 heads (1 propaganda + 8 regression + 8 binary) share the same trunk and s
 - Notes:
   - Early stopping triggered at epoch 6; best epoch restored to 3.
 
+#### All Task Types (Binary Propaganda Flat Baseline)
+
+All outputs are binary/regression heads: 18 binary propaganda heads + 8 regression discourse heads + 8 binary discourse heads. This isolates the effect of replacing multilabel propaganda with binary heads while keeping a flat topology.
+
+- Experiment key: `all_task_types_binary_prop`
+- Structure: `[[34]]` (18 propaganda binary + 8 regression + 8 binary discourse)
+- Source: `cluster_runs/outputs/nopo-all-task-types-bin-prop.out`
+- Validation F1 during threshold search: 0.6284
+
+| Metric | Value |
+|---|---:|
+| Accuracy | 0.5626 |
+| Precision | 0.2265 |
+| Recall | 0.5916 |
+| F1 | 0.2302 |
+| AUC | 0.5939 |
+| Average Precision | 0.2321 |
+| MSE | 2.7137 |
+| MAE | 1.2471 |
+| R2 | 0.1363 |
+| Pearson r | 0.3608 |
+
 ### Multiple Branches
 
 Test whether structured sharing (instead of fully flat sharing) improves transfer and reduces negative interference.
@@ -133,6 +177,28 @@ The model first splits into three family branches (propaganda, regression, binar
 - Notes:
   - Best AUC/AP among all all-task structures so far, with slightly improved regression quality vs flat.
 
+#### All Task Types (Binary Propaganda Grouped)
+
+The model branches into three families (propaganda binary, discourse regression, discourse binary), then expands to task heads. This checks whether grouped sharing still helps when propaganda is no longer multilabel.
+
+- Experiment key: `all_task_types_binary_prop_grouped`
+- Structure: `[[3], [18, 8, 8]]`
+- Source: `cluster_runs/outputs/nopo-all-task-bin-prop-grouped.out`
+- Validation F1 during threshold search: 0.6335
+
+| Metric | Value |
+|---|---:|
+| Accuracy | 0.5554 |
+| Precision | 0.2265 |
+| Recall | 0.5568 |
+| F1 | 0.2246 |
+| AUC | 0.5689 |
+| Average Precision | 0.2313 |
+| MSE | 2.7361 |
+| MAE | 1.2532 |
+| R2 | 0.1269 |
+| Pearson r | 0.3526 |
+
 #### All Task Types (Deep Grouped: All -> Some -> Tasks)
 
 The model splits into propaganda vs discourse, then discourse splits into regression vs binary, then each branch expands to task heads.
@@ -157,6 +223,28 @@ The model splits into propaganda vs discourse, then discourse splits into regres
 
 - Notes:
   - Better recall than flat/grouped, but consistently worse probability-quality (AUC/AP) and regression metrics.
+
+#### All Task Types (Binary Propaganda Deep Grouped)
+
+The model splits into propaganda vs discourse, then discourse splits into regression vs binary, and finally expands to 18/8/8 task heads. This tests deeper staged specialization with binary propaganda heads.
+
+- Experiment key: `all_task_types_binary_prop_deep_grouped`
+- Structure: `[[2], [1, 2], [18, 8, 8]]`
+- Source: `cluster_runs/outputs/nopo-all-task-bin-prop-deep.out`
+- Validation F1 during threshold search: 0.6001
+
+| Metric | Value |
+|---|---:|
+| Accuracy | 0.5254 |
+| Precision | 0.2255 |
+| Recall | 0.5554 |
+| F1 | 0.2133 |
+| AUC | 0.5600 |
+| Average Precision | 0.2269 |
+| MSE | 2.7556 |
+| MAE | 1.2610 |
+| R2 | 0.1161 |
+| Pearson r | 0.3371 |
 
 #### All Task Types (Pair-by-Dimension Hierarchy)
 
@@ -188,3 +276,21 @@ One propaganda branch stays separate while each discourse dimension forms a pair
 - Classification side: does F1/AP improve vs `all_task_types` without major AUC drop?
 - Regression side: does R2/Pearson improve while MSE/MAE do not degrade badly?
 - Training behavior: did `val_loss` remain stable and did best-epoch restore trigger?
+
+## Cross-Experiment Summary Table
+
+Legend: `HIGH` marks the highest numeric value in a row, `LOW` marks the lowest numeric value in a row (ignoring `None` and `TBD`).
+
+| Metric | propaganda | propaganda_cols_binary | discourse_dims | discourse_binary | all_task_types | all_task_types_binary_prop | all_task_types_grouped | all_task_types_binary_prop_grouped | all_task_types_deep_grouped | all_task_types_binary_prop_deep_grouped | all_task_types_pair_by_dimension |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Structure | [[1]] | [[18]] | [[8]] | [[8]] | [[17]] | [[34]] | [[3], [1, 8, 8]] | [[3], [18, 8, 8]] | [[2], [1, 2], [1, 8, 8]] | [[2], [1, 2], [18, 8, 8]] | [[9], [1, 2, 2, 2, 2, 2, 2, 2, 2]] |
+| Accuracy | **LOW 0.0045** | 0.5396 | None | 0.5584 | 0.4956 | **HIGH 0.5626** | 0.4923 | 0.5554 | 0.5364 | 0.5254 | 0.5276 |
+| Precision | 0.0851 | **LOW 0.0343** | None | **HIGH 0.5965** | 0.5106 | 0.2265 | 0.4933 | 0.2265 | 0.4677 | 0.2255 | 0.5482 |
+| Recall | 0.5374 | 0.5175 | None | **HIGH 0.6965** | **LOW 0.5004** | 0.5916 | 0.5156 | 0.5568 | 0.5665 | 0.5554 | 0.6238 |
+| F1 | 0.1357 | **LOW 0.0500** | None | **HIGH 0.5986** | 0.4335 | 0.2302 | 0.4360 | 0.2246 | 0.4607 | 0.2133 | 0.5395 |
+| AUC | **LOW 0.4820** | 0.5421 | None | 0.5227 | 0.6125 | 0.5939 | **HIGH 0.6264** | 0.5689 | 0.5153 | 0.5600 | 0.5779 |
+| Average Precision | **LOW 0.0277** | 0.0335 | None | 0.5640 | 0.5763 | 0.2321 | **HIGH 0.5909** | 0.2313 | 0.4998 | 0.2269 | 0.5268 |
+| MSE | None | None | 2.7409 | None | 2.7754 | **LOW 2.7137** | 2.7429 | 2.7361 | **HIGH 3.0726** | 2.7556 | 3.0417 |
+| MAE | None | None | 1.2550 | None | 1.2688 | **LOW 1.2471** | 1.2669 | 1.2532 | **HIGH 1.3497** | 1.2610 | 1.3457 |
+| R2 | None | None | 0.1167 | None | 0.1037 | **HIGH 0.1363** | 0.1142 | 0.1269 | 0.0124 | 0.1161 | **LOW -0.0001** |
+| Pearson r | None | None | 0.3575 | None | 0.3235 | **HIGH 0.3608** | 0.3404 | 0.3526 | **LOW 0.1574** | 0.3371 | 0.1824 |
