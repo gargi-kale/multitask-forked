@@ -54,6 +54,7 @@ Options:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from typing import Any, Dict, Optional, Sequence, Tuple
 
@@ -94,6 +95,28 @@ DISCOURSE_REGRESSION_COLUMNS: Tuple[str, ...] = (
 
 DISCOURSE_BINARY_COLUMNS: Tuple[str, ...] = tuple(
     f"{c}_bi" for c in DISCOURSE_REGRESSION_COLUMNS
+)
+
+# For experiments that model propaganda techniques as separate binary heads,
+# sanitize task names so Keras layer scopes remain valid (e.g., commas are invalid).
+def _sanitize_task_name(name: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.\\/>-]", "_", name)
+    if not safe or not re.match(r"^[A-Za-z0-9.]", safe):
+        safe = f"task_{safe}"
+    return safe
+
+
+PROPAGANDA_BINARY_TASK_NAMES: Tuple[str, ...] = tuple(
+    _sanitize_task_name(col) for col in PROPAGANDA_TECHNIQUE_COLUMNS
+)
+
+if len(set(PROPAGANDA_BINARY_TASK_NAMES)) != len(PROPAGANDA_BINARY_TASK_NAMES):
+    raise ValueError(
+        "Sanitized propaganda binary task names are not unique; adjust naming."
+    )
+
+PROPAGANDA_BINARY_LABEL_MAP: Dict[str, str] = dict(
+    zip(PROPAGANDA_BINARY_TASK_NAMES, PROPAGANDA_TECHNIQUE_COLUMNS)
 )
 
 
@@ -137,8 +160,10 @@ def load_splits(
     prefix: str = "no_prop_overlap_",
     na_strings: Tuple[str, ...] = ("NA", "na", "NaN", ""),
     mask_value: float = -1.0,
+    label_column_map: Optional[Dict[str, str]] = None,
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset, tf.data.Dataset]:
     multilabel_groups = multilabel_groups or {}
+    label_column_map = label_column_map or {}
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, use_fast=False)
 
     def _to_float(s: pd.Series) -> np.ndarray:
@@ -151,7 +176,8 @@ def load_splits(
         labels: Dict[str, np.ndarray] = {}
 
         for col in label_columns:
-            labels[col] = _to_float(df[col])
+            source_col = label_column_map.get(col, col)
+            labels[col] = _to_float(df[source_col])
 
         for name, cols in multilabel_groups.items():
             labels[name] = np.stack([_to_float(df[c]) for c in cols], axis=1)
@@ -262,13 +288,18 @@ def run_propaganda(args: argparse.Namespace) -> None:
 
 def run_propaganda_cols_binary(args: argparse.Namespace) -> None:
     print("\n=== Experiment: propaganda_cols_binary ===")
-    cols = list(PROPAGANDA_TECHNIQUE_COLUMNS)
-    train_ds, val_ds, _ = load_splits(cols, batch_size=args.batch_size, data_dir=args.data_dir)
+    task_names = list(PROPAGANDA_BINARY_TASK_NAMES)
+    train_ds, val_ds, _ = load_splits(
+        task_names,
+        batch_size=args.batch_size,
+        data_dir=args.data_dir,
+        label_column_map=PROPAGANDA_BINARY_LABEL_MAP,
+    )
     config = ModelConfig(
-        task_structure=[[len(cols)]],
-        task_names=cols,
-        task_types=["binary"] * len(cols),
-        num_classes_per_task=[2] * len(cols),
+        task_structure=[[len(task_names)]],
+        task_names=task_names,
+        task_types=["binary"] * len(task_names),
+        num_classes_per_task=[2] * len(task_names),
         encoder_config=ENCODER_CONFIGS[args.encoder],
     )
     run_experiment(
@@ -397,27 +428,29 @@ def _prepare_all_task_types_binary_prop_data_and_config(
     *,
     task_structure: Sequence[Sequence[int]],
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset, ModelConfig]:
+    propaganda_task_names = list(PROPAGANDA_BINARY_TASK_NAMES)
     train_ds, val_ds, _ = load_splits(
         label_columns=(
-            list(PROPAGANDA_TECHNIQUE_COLUMNS)
+            propaganda_task_names
             + list(DISCOURSE_REGRESSION_COLUMNS)
             + list(DISCOURSE_BINARY_COLUMNS)
         ),
         batch_size=args.batch_size,
         data_dir=args.data_dir,
+        label_column_map=PROPAGANDA_BINARY_LABEL_MAP,
     )
     task_names = (
-        list(PROPAGANDA_TECHNIQUE_COLUMNS)
+        propaganda_task_names
         + list(DISCOURSE_REGRESSION_COLUMNS)
         + list(DISCOURSE_BINARY_COLUMNS)
     )
     task_types = (
-        ["binary"] * len(PROPAGANDA_TECHNIQUE_COLUMNS)
+        ["binary"] * len(propaganda_task_names)
         + ["regression"] * len(DISCOURSE_REGRESSION_COLUMNS)
         + ["binary"] * len(DISCOURSE_BINARY_COLUMNS)
     )
     num_classes_per_task = (
-        [2] * len(PROPAGANDA_TECHNIQUE_COLUMNS)
+        [2] * len(propaganda_task_names)
         + [1] * len(DISCOURSE_REGRESSION_COLUMNS)
         + [2] * len(DISCOURSE_BINARY_COLUMNS)
     )
@@ -453,7 +486,7 @@ def run_all_task_types_binary_prop(args: argparse.Namespace) -> None:
     train_ds, val_ds, config = _prepare_all_task_types_binary_prop_data_and_config(
         args,
         task_structure=[[
-            len(PROPAGANDA_TECHNIQUE_COLUMNS)
+            len(PROPAGANDA_BINARY_TASK_NAMES)
             + len(DISCOURSE_REGRESSION_COLUMNS)
             + len(DISCOURSE_BINARY_COLUMNS)
         ]],
@@ -476,7 +509,7 @@ def run_all_task_types_binary_prop_grouped(args: argparse.Namespace) -> None:
         task_structure=[[
             3
         ], [
-            len(PROPAGANDA_TECHNIQUE_COLUMNS),
+            len(PROPAGANDA_BINARY_TASK_NAMES),
             len(DISCOURSE_REGRESSION_COLUMNS),
             len(DISCOURSE_BINARY_COLUMNS),
         ]],
@@ -500,7 +533,7 @@ def run_all_task_types_binary_prop_deep_grouped(args: argparse.Namespace) -> Non
             [2],
             [1, 2],
             [
-                len(PROPAGANDA_TECHNIQUE_COLUMNS),
+                len(PROPAGANDA_BINARY_TASK_NAMES),
                 len(DISCOURSE_REGRESSION_COLUMNS),
                 len(DISCOURSE_BINARY_COLUMNS),
             ],
