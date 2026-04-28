@@ -23,6 +23,8 @@ Experiments:
     discourse_binary    Binary discourse dimensions
     propaganda_binary   Propaganda techniques + binary discourse dimensions
     all_task_types      All task types combined
+    all_task_types_pair_by_dimension
+                        Pair-by-dimension hierarchy (regression+binary sibling pairs)
     all_task_types_grouped
                         All task types with grouped hierarchy by task family
     all_task_types_deep_grouped
@@ -182,8 +184,19 @@ def run_experiment(
     learning_rate: float = 4e-5,
     optimize_thresholds: bool = True,
     verbose: int = 1,
+    show_structure: bool = False,
 ) -> Dict[str, Any]:
     model = MultiTaskModel(config)
+    if show_structure:
+        print("\nModel structure:")
+        print(model.summary_tree())
+        print("Task paths:")
+        for info in model.get_task_info():
+            print(
+                f"  {info['output_idx']:>2}  {info['name']:<35} "
+                f"path={info['parent_branch_path']}"
+            )
+
     trainer = Trainer(
         model,
         TrainingConfig(
@@ -235,6 +248,7 @@ def run_propaganda(args: argparse.Namespace) -> None:
         learning_rate=args.learning_rate,
         optimize_thresholds=not args.no_optimize_thresh,
         verbose=args.verbose,
+        show_structure=args.show_structure,
     )
 
 
@@ -256,6 +270,7 @@ def run_discourse_dims(args: argparse.Namespace) -> None:
         learning_rate=args.learning_rate,
         optimize_thresholds=False,
         verbose=args.verbose,
+        show_structure=args.show_structure,
     )
 
 
@@ -277,6 +292,7 @@ def run_discourse_binary(args: argparse.Namespace) -> None:
         learning_rate=args.learning_rate,
         optimize_thresholds=not args.no_optimize_thresh,
         verbose=args.verbose,
+        show_structure=args.show_structure,
     )
 
 
@@ -306,6 +322,7 @@ def run_propaganda_binary(args: argparse.Namespace) -> None:
         learning_rate=args.learning_rate,
         optimize_thresholds=not args.no_optimize_thresh,
         verbose=args.verbose,
+        show_structure=args.show_structure,
     )
 
 
@@ -358,6 +375,41 @@ def run_all_task_types(args: argparse.Namespace) -> None:
         learning_rate=args.learning_rate,
         optimize_thresholds=not args.no_optimize_thresh,
         verbose=args.verbose,
+        show_structure=args.show_structure,
+    )
+
+
+def run_all_task_types_pair_by_dimension(args: argparse.Namespace) -> None:
+    print("\n=== Experiment: all_task_types_pair_by_dimension ===")
+    paired_names = []
+    paired_types = []
+    paired_num_classes = []
+    for reg_col, bi_col in zip(DISCOURSE_REGRESSION_COLUMNS, DISCOURSE_BINARY_COLUMNS):
+        paired_names.extend([reg_col, bi_col])
+        paired_types.extend(["regression", "binary"])
+        paired_num_classes.extend([1, 2])
+
+    train_ds, val_ds, _ = load_splits(
+        label_columns=list(DISCOURSE_REGRESSION_COLUMNS) + list(DISCOURSE_BINARY_COLUMNS),
+        multilabel_groups={"propaganda_techniques": list(PROPAGANDA_TECHNIQUE_COLUMNS)},
+        batch_size=args.batch_size,
+        data_dir=args.data_dir,
+    )
+    config = ModelConfig(
+        task_structure=[[1 + len(DISCOURSE_REGRESSION_COLUMNS)], [1] + [2] * len(DISCOURSE_REGRESSION_COLUMNS)],
+        task_names=["propaganda_techniques"] + paired_names,
+        task_types=["multilabel"] + paired_types,
+        num_classes_per_task=[len(PROPAGANDA_TECHNIQUE_COLUMNS)] + paired_num_classes,
+        encoder_config=ENCODER_CONFIGS[args.encoder],
+    )
+    run_experiment(
+        config, train_ds, val_ds,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        optimize_thresholds=not args.no_optimize_thresh,
+        verbose=args.verbose,
+        show_structure=args.show_structure,
     )
 
 
@@ -374,6 +426,7 @@ def run_all_task_types_grouped(args: argparse.Namespace) -> None:
         learning_rate=args.learning_rate,
         optimize_thresholds=not args.no_optimize_thresh,
         verbose=args.verbose,
+        show_structure=args.show_structure,
     )
 
 
@@ -394,6 +447,7 @@ def run_all_task_types_deep_grouped(args: argparse.Namespace) -> None:
         learning_rate=args.learning_rate,
         optimize_thresholds=not args.no_optimize_thresh,
         verbose=args.verbose,
+        show_structure=args.show_structure,
     )
 
 
@@ -408,6 +462,7 @@ EXPERIMENTS = {
     "discourse_binary": run_discourse_binary,
     "propaganda_binary": run_propaganda_binary,
     "all_task_types": run_all_task_types,
+    "all_task_types_pair_by_dimension": run_all_task_types_pair_by_dimension,
     "all_task_types_grouped": run_all_task_types_grouped,
     "all_task_types_deep_grouped": run_all_task_types_deep_grouped,
     "output_pooling": run_output_pooling,
@@ -438,6 +493,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable threshold optimization (always off for regression)",
     )
     parser.add_argument("--verbose", type=int, default=1, choices=[0, 1, 2])
+    parser.add_argument(
+        "--show-structure",
+        action="store_true",
+        help="Print summary_tree() and task paths before training",
+    )
     parser.add_argument(
         "--encoder", default="distilbert", choices=list(ENCODER_CONFIGS),
         help="Encoder config to use",
