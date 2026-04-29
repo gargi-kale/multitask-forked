@@ -1,11 +1,13 @@
+import sys
 import pytest
+from unittest.mock import MagicMock, patch
 
 ENCODER_OUTPUT_DIM = 64
 BATCH_SIZE = 4
 
 try:
     import tensorflow as tf
-    from multitask.config import EncoderConfig, EncoderInputType, ModelConfig
+    from multitask.config import EncoderConfig, EncoderInputType, EncoderIntegration, ModelConfig
     from multitask.models.hierarchical import MultiTaskModel
     HAS_TF = True
 
@@ -112,7 +114,6 @@ def _make_model(config, encoder=None, num_classes_per_task=None, trainable_encod
         config=config,
         encoder=encoder,
         num_classes_per_task=num_classes_per_task,
-        dropout_rate=dropout_rate,
         trainable_encoder=trainable_encoder,
     )
 
@@ -242,3 +243,49 @@ class TestMultiTaskModelWithEncoderInConfig:
         assert set(restored.keys()) == set(out.keys())
         for name in out:
             tf.debugging.assert_near(restored[name], out[name])
+
+
+_PT_ONLY_ERROR = OSError(
+    "bert-base-uncased does not appear to have a file named tf_model.h5, "
+    "model.safetensors.index.json, model.safetensors, tf_model.h5.index.json or tf_model.h5"
+)
+
+
+def _mock_transformers(from_pretrained_side_effect):
+    """Return a sys.modules patch that replaces transformers with a mock TFAutoModel."""
+    mock_tf_auto = MagicMock()
+    mock_tf_auto.from_pretrained.side_effect = from_pretrained_side_effect
+    return patch.dict(sys.modules, {"transformers": MagicMock(TFAutoModel=mock_tf_auto)})
+
+
+class TestHuggingFaceFromPt:
+    """from_pt error handling when a HuggingFace model only ships PyTorch weights."""
+    def test_raises_informative_error_without_from_pt(self):
+        """OSError with no TF weights becomes a clear message pointing to from_pt=True."""
+        config = ModelConfig(
+            task_structure=[[2]],
+            encoder_config=EncoderConfig(
+                encoder_identifier="bert-base-uncased",
+                encoder_input_type=EncoderInputType.HUGGINGFACE_TOKENS,
+                encoder_integration=EncoderIntegration.HUGGINGFACE,
+                from_pt=False,
+            ),
+        )
+        with _mock_transformers(_PT_ONLY_ERROR):
+            with pytest.raises(OSError, match="from_pt=True"):
+                MultiTaskModel(config=config)
+
+    def test_original_error_raised_when_from_pt_true(self):
+        """When from_pt=True an OSError is not wrapped — the original is re-raised."""
+        config = ModelConfig(
+            task_structure=[[2]],
+            encoder_config=EncoderConfig(
+                encoder_identifier="bert-base-uncased",
+                encoder_input_type=EncoderInputType.HUGGINGFACE_TOKENS,
+                encoder_integration=EncoderIntegration.HUGGINGFACE,
+                from_pt=True,
+            ),
+        )
+        with _mock_transformers(OSError("network timeout")):
+            with pytest.raises(OSError, match="network timeout"):
+                MultiTaskModel(config=config)

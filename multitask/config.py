@@ -118,6 +118,8 @@ class EncoderConfig:
     # Do not serialize to disk; use environment variables or pass at runtime.
     api_key: Optional[str] = None
 
+    from_pt: Optional[bool] = False
+
     def __post_init__(self):
         """Validate encoder configuration."""
         if self.encoder_input_type is not None and not isinstance(self.encoder_input_type, EncoderInputType):
