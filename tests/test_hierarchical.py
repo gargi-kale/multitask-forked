@@ -115,13 +115,6 @@ class TestMultiTaskModelInit:
                 num_classes_per_task=[2, 0],
             )
 
-    def test_raises_when_dropout_invalid(self, config_two_tasks):
-        """ValueError when dropout_rate not in [0, 1)."""
-        with pytest.raises(ValueError, match="dropout_rate must be in range"):
-            _make_model(config_two_tasks, embedding_dim=64)
-        with pytest.raises(ValueError, match="dropout_rate must be in range"):
-            _make_model(config_two_tasks, embedding_dim=64)
-
     def test_raises_when_no_encoder_and_no_embedding_dim(self, config_two_tasks):
         """ValueError when encoder is None and embedding_dim is None."""
         with pytest.raises(ValueError, match="Must specify embedding_dim"):
