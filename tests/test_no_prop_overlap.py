@@ -37,6 +37,7 @@ Experiments:
                         All task types with grouped hierarchy by task family
     all_task_types_deep_grouped
                         All task types with deep hierarchy (all -> some -> tasks)
+    paper_replication   Propaganda binary cols + WA_bi + binary discourse, grouped hierarchy
     output_pooling      Output pooling on propaganda (not yet implemented)
     all                 Run all experiments in sequence
 
@@ -47,7 +48,7 @@ Options:
     --learning-rate LR      Learning rate (default: 4e-5)
     --no-optimize-thresh    Disable threshold optimization
     --verbose N             Keras verbosity 0/1/2 (default: 1)
-    --encoder {distilbert,tfhub-bert}
+    --encoder {distilbert,tfhub-bert,small-bert}
                             Encoder config to use (default: distilbert)
 """
 
@@ -138,9 +139,17 @@ ecfg_tfhub_bert = EncoderConfig(
     trainable_encoder=True,
 )
 
+ecfg_small_bert = EncoderConfig(
+    encoder_identifier="https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-4_H-512_A-8/2",
+    encoder_input_type=EncoderInputType.TFHUB_TOKENS,
+    encoder_integration=EncoderIntegration.TFHUB,
+    trainable_encoder=True,
+)
+
 ENCODER_CONFIGS = {
     "distilbert": ecfg_distilbert_uncased,
     "tfhub-bert": ecfg_tfhub_bert,
+    "small-bert": ecfg_small_bert,
 }
 
 
@@ -622,6 +631,41 @@ def run_all_task_types_deep_grouped(args: argparse.Namespace) -> None:
     )
 
 
+def run_paper_replication(args: argparse.Namespace) -> None:
+    print("\n=== Experiment: paper_replication ===")
+    propaganda_task_names = list(PROPAGANDA_BINARY_TASK_NAMES)
+    discourse_task_names = list(DISCOURSE_BINARY_COLUMNS)
+    all_task_names = propaganda_task_names + ["WA_bi"] + discourse_task_names
+
+    train_ds, val_ds, _ = load_splits(
+        label_columns=all_task_names,
+        batch_size=args.batch_size,
+        data_dir=args.data_dir,
+        label_column_map=PROPAGANDA_BINARY_LABEL_MAP,
+    )
+    task_types = ["binary"] * len(all_task_names)
+    num_classes_per_task = [2] * len(all_task_names)
+    config = ModelConfig(
+        task_structure=[
+            [len(all_task_names)],
+            [len(propaganda_task_names), 1, len(discourse_task_names)],
+        ],
+        task_names=all_task_names,
+        task_types=task_types,
+        num_classes_per_task=num_classes_per_task,
+        encoder_config=ENCODER_CONFIGS[args.encoder],
+    )
+    run_experiment(
+        config, train_ds, val_ds,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        optimize_thresholds=not args.no_optimize_thresh,
+        verbose=args.verbose,
+        show_structure=args.show_structure,
+    )
+
+
 def run_output_pooling(args: argparse.Namespace) -> None:
     print("\n=== Experiment: output_pooling ===")
     print("Not yet implemented.")
@@ -640,6 +684,7 @@ EXPERIMENTS = {
     "all_task_types_pair_by_dimension": run_all_task_types_pair_by_dimension,
     "all_task_types_grouped": run_all_task_types_grouped,
     "all_task_types_deep_grouped": run_all_task_types_deep_grouped,
+    "paper_replication": run_paper_replication,
     "output_pooling": run_output_pooling,
 }
 
