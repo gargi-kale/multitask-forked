@@ -161,6 +161,7 @@ def load_splits(
     label_columns: Sequence[str] = (),
     *,
     multilabel_groups: Optional[Dict[str, Sequence[str]]] = None,
+    encoder_config: Optional[EncoderConfig] = None,
     text_column: str = "text",
     batch_size: int = 32,
     tokenizer_name: str = "distilbert-base-uncased",
@@ -173,6 +174,7 @@ def load_splits(
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset, tf.data.Dataset]:
     multilabel_groups = multilabel_groups or {}
     label_column_map = label_column_map or {}
+    encoder_config = encoder_config or ENCODER_CONFIGS["distilbert"]
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, use_fast=False)
 
     def _to_float(s: pd.Series) -> np.ndarray:
@@ -200,10 +202,27 @@ def load_splits(
             return_tensors="np",
         )
 
-        inputs = {
-            "input_ids": enc["input_ids"].astype(np.int32),
-            "attention_mask": enc["attention_mask"].astype(np.int32),
-        }
+        if encoder_config.encoder_input_type == EncoderInputType.TFHUB_TOKENS:
+            input_type_ids = (
+                enc["token_type_ids"].astype(np.int32)
+                if "token_type_ids" in enc
+                else np.zeros_like(enc["input_ids"], dtype=np.int32)
+            )
+            inputs = {
+                "input_word_ids": enc["input_ids"].astype(np.int32),
+                "input_mask": enc["attention_mask"].astype(np.int32),
+                "input_type_ids": input_type_ids,
+            }
+        elif encoder_config.encoder_input_type == EncoderInputType.HUGGINGFACE_TOKENS:
+            inputs = {
+                "input_ids": enc["input_ids"].astype(np.int32),
+                "attention_mask": enc["attention_mask"].astype(np.int32),
+            }
+        else:
+            raise ValueError(
+                f"load_splits only supports tokenized encoders in this script. "
+                f"Got encoder_input_type={encoder_config.encoder_input_type!r}."
+            )
 
         ds = tf.data.Dataset.from_tensor_slices((inputs, labels))
         if split == "train":
@@ -272,8 +291,10 @@ def run_experiment(
 def run_propaganda(args: argparse.Namespace) -> None:
     print("\n=== Experiment: propaganda ===")
     cols = list(PROPAGANDA_TECHNIQUE_COLUMNS)
+    encoder_config = ENCODER_CONFIGS[args.encoder]
     train_ds, val_ds, _ = load_splits(
         multilabel_groups={"propaganda_techniques": cols},
+        encoder_config=encoder_config,
         batch_size=args.batch_size,
         data_dir=args.data_dir,
     )
@@ -282,7 +303,7 @@ def run_propaganda(args: argparse.Namespace) -> None:
         task_names=["propaganda_techniques"],
         task_types=["multilabel"],
         num_classes_per_task=[len(cols)],
-        encoder_config=ENCODER_CONFIGS[args.encoder],
+        encoder_config=encoder_config,
     )
     run_experiment(
         config, train_ds, val_ds,
@@ -298,8 +319,10 @@ def run_propaganda(args: argparse.Namespace) -> None:
 def run_propaganda_cols_binary(args: argparse.Namespace) -> None:
     print("\n=== Experiment: propaganda_cols_binary ===")
     task_names = list(PROPAGANDA_BINARY_TASK_NAMES)
+    encoder_config = ENCODER_CONFIGS[args.encoder]
     train_ds, val_ds, _ = load_splits(
         task_names,
+        encoder_config=encoder_config,
         batch_size=args.batch_size,
         data_dir=args.data_dir,
         label_column_map=PROPAGANDA_BINARY_LABEL_MAP,
@@ -309,7 +332,7 @@ def run_propaganda_cols_binary(args: argparse.Namespace) -> None:
         task_names=task_names,
         task_types=["binary"] * len(task_names),
         num_classes_per_task=[2] * len(task_names),
-        encoder_config=ENCODER_CONFIGS[args.encoder],
+        encoder_config=encoder_config,
     )
     run_experiment(
         config, train_ds, val_ds,
@@ -325,13 +348,19 @@ def run_propaganda_cols_binary(args: argparse.Namespace) -> None:
 def run_discourse_dims(args: argparse.Namespace) -> None:
     print("\n=== Experiment: discourse_dims ===")
     cols = list(DISCOURSE_REGRESSION_COLUMNS)
-    train_ds, val_ds, _ = load_splits(cols, batch_size=args.batch_size, data_dir=args.data_dir)
+    encoder_config = ENCODER_CONFIGS[args.encoder]
+    train_ds, val_ds, _ = load_splits(
+        cols,
+        encoder_config=encoder_config,
+        batch_size=args.batch_size,
+        data_dir=args.data_dir,
+    )
     config = ModelConfig(
         task_structure=[[len(cols)]],
         task_names=cols,
         task_types=["regression"] * len(cols),
         num_classes_per_task=[1] * len(cols),
-        encoder_config=ENCODER_CONFIGS[args.encoder],
+        encoder_config=encoder_config,
     )
     run_experiment(
         config, train_ds, val_ds,
@@ -347,13 +376,19 @@ def run_discourse_dims(args: argparse.Namespace) -> None:
 def run_discourse_binary(args: argparse.Namespace) -> None:
     print("\n=== Experiment: discourse_binary ===")
     cols = list(DISCOURSE_BINARY_COLUMNS)
-    train_ds, val_ds, _ = load_splits(cols, batch_size=args.batch_size, data_dir=args.data_dir)
+    encoder_config = ENCODER_CONFIGS[args.encoder]
+    train_ds, val_ds, _ = load_splits(
+        cols,
+        encoder_config=encoder_config,
+        batch_size=args.batch_size,
+        data_dir=args.data_dir,
+    )
     config = ModelConfig(
         task_structure=[[len(cols)]],
         task_names=cols,
         task_types=["binary"] * len(cols),
         num_classes_per_task=[2] * len(cols),
-        encoder_config=ENCODER_CONFIGS[args.encoder],
+        encoder_config=encoder_config,
     )
     run_experiment(
         config, train_ds, val_ds,
@@ -369,9 +404,11 @@ def run_discourse_binary(args: argparse.Namespace) -> None:
 def run_propaganda_binary(args: argparse.Namespace) -> None:
     print("\n=== Experiment: propaganda_binary ===")
     binary_cols = list(DISCOURSE_BINARY_COLUMNS)
+    encoder_config = ENCODER_CONFIGS[args.encoder]
     train_ds, val_ds, _ = load_splits(
         label_columns=binary_cols,
         multilabel_groups={"propaganda_techniques": list(PROPAGANDA_TECHNIQUE_COLUMNS)},
+        encoder_config=encoder_config,
         batch_size=args.batch_size,
         data_dir=args.data_dir,
     )
@@ -383,7 +420,7 @@ def run_propaganda_binary(args: argparse.Namespace) -> None:
         task_names=task_names,
         task_types=task_types,
         num_classes_per_task=num_classes_per_task,
-        encoder_config=ENCODER_CONFIGS[args.encoder],
+        encoder_config=encoder_config,
     )
     run_experiment(
         config, train_ds, val_ds,
@@ -401,9 +438,11 @@ def _prepare_all_task_types_data_and_config(
     *,
     task_structure: Sequence[Sequence[int]],
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset, ModelConfig]:
+    encoder_config = ENCODER_CONFIGS[args.encoder]
     train_ds, val_ds, _ = load_splits(
         label_columns=list(DISCOURSE_REGRESSION_COLUMNS) + list(DISCOURSE_BINARY_COLUMNS),
         multilabel_groups={"propaganda_techniques": list(PROPAGANDA_TECHNIQUE_COLUMNS)},
+        encoder_config=encoder_config,
         batch_size=args.batch_size,
         data_dir=args.data_dir,
     )
@@ -427,7 +466,7 @@ def _prepare_all_task_types_data_and_config(
         task_names=task_names,
         task_types=task_types,
         num_classes_per_task=num_classes_per_task,
-        encoder_config=ENCODER_CONFIGS[args.encoder],
+        encoder_config=encoder_config,
     )
     return train_ds, val_ds, config
 
@@ -438,12 +477,14 @@ def _prepare_all_task_types_binary_prop_data_and_config(
     task_structure: Sequence[Sequence[int]],
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset, ModelConfig]:
     propaganda_task_names = list(PROPAGANDA_BINARY_TASK_NAMES)
+    encoder_config = ENCODER_CONFIGS[args.encoder]
     train_ds, val_ds, _ = load_splits(
         label_columns=(
             propaganda_task_names
             + list(DISCOURSE_REGRESSION_COLUMNS)
             + list(DISCOURSE_BINARY_COLUMNS)
         ),
+        encoder_config=encoder_config,
         batch_size=args.batch_size,
         data_dir=args.data_dir,
         label_column_map=PROPAGANDA_BINARY_LABEL_MAP,
@@ -468,7 +509,7 @@ def _prepare_all_task_types_binary_prop_data_and_config(
         task_names=task_names,
         task_types=task_types,
         num_classes_per_task=num_classes_per_task,
-        encoder_config=ENCODER_CONFIGS[args.encoder],
+        encoder_config=encoder_config,
     )
     return train_ds, val_ds, config
 
@@ -569,9 +610,11 @@ def run_all_task_types_pair_by_dimension(args: argparse.Namespace) -> None:
         paired_types.extend(["regression", "binary"])
         paired_num_classes.extend([1, 2])
 
+    encoder_config = ENCODER_CONFIGS[args.encoder]
     train_ds, val_ds, _ = load_splits(
         label_columns=list(DISCOURSE_REGRESSION_COLUMNS) + list(DISCOURSE_BINARY_COLUMNS),
         multilabel_groups={"propaganda_techniques": list(PROPAGANDA_TECHNIQUE_COLUMNS)},
+        encoder_config=encoder_config,
         batch_size=args.batch_size,
         data_dir=args.data_dir,
     )
@@ -580,7 +623,7 @@ def run_all_task_types_pair_by_dimension(args: argparse.Namespace) -> None:
         task_names=["propaganda_techniques"] + paired_names,
         task_types=["multilabel"] + paired_types,
         num_classes_per_task=[len(PROPAGANDA_TECHNIQUE_COLUMNS)] + paired_num_classes,
-        encoder_config=ENCODER_CONFIGS[args.encoder],
+        encoder_config=encoder_config,
     )
     run_experiment(
         config, train_ds, val_ds,
@@ -637,8 +680,10 @@ def run_paper_replication(args: argparse.Namespace) -> None:
     discourse_task_names = list(DISCOURSE_BINARY_COLUMNS)
     all_task_names = propaganda_task_names + ["WA_bi"] + discourse_task_names
 
+    encoder_config = ENCODER_CONFIGS[args.encoder]
     train_ds, val_ds, _ = load_splits(
         label_columns=all_task_names,
+        encoder_config=encoder_config,
         batch_size=args.batch_size,
         data_dir=args.data_dir,
         label_column_map=PROPAGANDA_BINARY_LABEL_MAP,
@@ -653,7 +698,7 @@ def run_paper_replication(args: argparse.Namespace) -> None:
         task_names=all_task_names,
         task_types=task_types,
         num_classes_per_task=num_classes_per_task,
-        encoder_config=ENCODER_CONFIGS[args.encoder],
+        encoder_config=encoder_config,
     )
     run_experiment(
         config, train_ds, val_ds,
