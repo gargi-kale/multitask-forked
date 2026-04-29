@@ -647,7 +647,7 @@ def run_paper_replication(args: argparse.Namespace) -> None:
     num_classes_per_task = [2] * len(all_task_names)
     config = ModelConfig(
         task_structure=[
-            [len(all_task_names)],
+            [3],
             [len(propaganda_task_names), 1, len(discourse_task_names)],
         ],
         task_names=all_task_names,
