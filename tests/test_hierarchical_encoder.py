@@ -1,3 +1,4 @@
+import os
 import sys
 import pytest
 from unittest.mock import MagicMock, patch
@@ -19,7 +20,16 @@ except ImportError:
     EncoderConfig = None
     EncoderInputType = None
 
+try:
+    import transformers  # noqa: F401
+    HAS_TRANSFORMERS = True
+except ImportError:
+    HAS_TRANSFORMERS = False
+
 pytestmark = pytest.mark.skipif(not HAS_TF, reason="tensorflow not installed")
+
+RUN_HF_FROM_PT_INTEGRATION = os.getenv("MULTITASK_RUN_HF_FROM_PT_INTEGRATION", "0") == "1"
+HF_PT_ONLY_MODEL_ID = "sentence-transformers/multi-qa-distilbert-cos-v1"
 
 class FakeEncoderLayer(tf.keras.layers.Layer):
     def __init__(self, output_dim, **kwargs):
@@ -289,3 +299,63 @@ class TestHuggingFaceFromPt:
         with _mock_transformers(OSError("network timeout")):
             with pytest.raises(OSError, match="network timeout"):
                 MultiTaskModel(config=config)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not HAS_TRANSFORMERS, reason="transformers not installed")
+@pytest.mark.skipif(
+    not RUN_HF_FROM_PT_INTEGRATION,
+    reason="set MULTITASK_RUN_HF_FROM_PT_INTEGRATION=1 to run networked HF from_pt integration tests",
+)
+class TestHuggingFaceFromPtIntegration:
+    """Networked integration test for models that may only publish PyTorch weights."""
+
+    def test_real_model_without_from_pt_raises_guidance(self):
+        """Real HF fetch with from_pt=False should surface guidance for PyTorch-only models."""
+        config = ModelConfig(
+            task_structure=[[2]],
+            encoder_config=EncoderConfig(
+                encoder_identifier=HF_PT_ONLY_MODEL_ID,
+                encoder_input_type=EncoderInputType.HUGGINGFACE_TOKENS,
+                encoder_integration=EncoderIntegration.HUGGINGFACE,
+                from_pt=False,
+            ),
+        )
+        try:
+            MultiTaskModel(config=config)
+        except OSError as exc:
+            assert "from_pt=True" in str(exc)
+        except ValueError as exc:
+            if "Unrecognized configuration class" in str(exc) and "TFAutoModel" in str(exc):
+                pytest.skip(
+                    f"Model '{HF_PT_ONLY_MODEL_ID}' has no TensorFlow architecture in transformers; "
+                    "choose a model with TF architecture support via MULTITASK_HF_PT_ONLY_MODEL_ID."
+                )
+            raise
+        else:
+            pytest.skip(
+                f"Model '{HF_PT_ONLY_MODEL_ID}' loaded TensorFlow weights directly; "
+                "pick a PyTorch-only model via MULTITASK_HF_PT_ONLY_MODEL_ID."
+            )
+
+    def test_real_model_with_from_pt_true_loads_without_error(self):
+        """Real HF fetch with from_pt=True should initialize without wrapping TF-weight errors."""
+        config = ModelConfig(
+            task_structure=[[2]],
+            encoder_config=EncoderConfig(
+                encoder_identifier=HF_PT_ONLY_MODEL_ID,
+                encoder_input_type=EncoderInputType.HUGGINGFACE_TOKENS,
+                encoder_integration=EncoderIntegration.HUGGINGFACE,
+                from_pt=True,
+            ),
+        )
+        try:
+            model = MultiTaskModel(config=config)
+        except ValueError as exc:
+            if "Unrecognized configuration class" in str(exc) and "TFAutoModel" in str(exc):
+                pytest.skip(
+                    f"Model '{HF_PT_ONLY_MODEL_ID}' has no TensorFlow architecture in transformers; "
+                    "cannot validate from_pt conversion for this model family."
+                )
+            raise
+        assert model.uses_encoder is True
