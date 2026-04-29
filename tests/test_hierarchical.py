@@ -57,13 +57,12 @@ def config_multiclass():
     )
 
 
-def _make_model(config, embedding_dim=64, num_classes_per_task=None, dropout_rate=0.1):
+def _make_model(config, embedding_dim=64, num_classes_per_task=None):
     """Build MultiTaskModel with embeddings (no encoder) for testing."""
     return MultiTaskModel(
         config=config,
         embedding_dim=embedding_dim,
-        num_classes_per_task=num_classes_per_task,
-        dropout_rate=dropout_rate,
+        num_classes_per_task=num_classes_per_task
     )
 
 
@@ -119,9 +118,9 @@ class TestMultiTaskModelInit:
     def test_raises_when_dropout_invalid(self, config_two_tasks):
         """ValueError when dropout_rate not in [0, 1)."""
         with pytest.raises(ValueError, match="dropout_rate must be in range"):
-            _make_model(config_two_tasks, embedding_dim=64, dropout_rate=1.0)
+            _make_model(config_two_tasks, embedding_dim=64)
         with pytest.raises(ValueError, match="dropout_rate must be in range"):
-            _make_model(config_two_tasks, embedding_dim=64, dropout_rate=-0.1)
+            _make_model(config_two_tasks, embedding_dim=64)
 
     def test_raises_when_no_encoder_and_no_embedding_dim(self, config_two_tasks):
         """ValueError when encoder is None and embedding_dim is None."""

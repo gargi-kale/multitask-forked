@@ -304,9 +304,6 @@ class ModelConfig:
                 }
             }
     """
-    # Model hyperparameters
-    dropout_rate: float = 0.1
-    
     # Task structure: nested list defining branching hierarchy
     # Format: [[n_initial], [n_children_0, n_children_1, ...], [...], ...]
     task_structure: List[List[int]] = field(default_factory=lambda: [[3], [2, 5, 3]])
@@ -360,6 +357,7 @@ class ModelConfig:
     # mask value for missing values. Default -1
     # change if -1 is a valid regression target in the data
     mask_value: float = -1.0
+
     # Whether to standardize regression targets (mean=0, std=1)
     standardize_regression: bool = True
     

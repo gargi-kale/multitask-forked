@@ -106,7 +106,7 @@ def encoder_inputs():
     """Sample inputs matching the encoder contract: (batch_size, encoder_output_dim)"""
     return make_encoder_inputs()
 
-def _make_model(config, encoder=None, num_classes_per_task=None, dropout_rate=0.1, trainable_encoder=None):
+def _make_model(config, encoder=None, num_classes_per_task=None, trainable_encoder=None):
     """Build MultiTaskModel; pass encoder= for a custom Keras encoder."""
     return MultiTaskModel(
         config=config,
@@ -130,12 +130,12 @@ def model_with_encoder_ten_tasks(config_ten_tasks, encoder_instance):
 @pytest.fixture
 def model_two_tasks_encoder_in_config(config_two_tasks_with_encoder_in_config):
     """MultiTaskModel with custom encoder inside config.encoder_config."""
-    return MultiTaskModel(config=config_two_tasks_with_encoder_in_config, dropout_rate=0.0)
+    return MultiTaskModel(config=config_two_tasks_with_encoder_in_config)
 
 @pytest.fixture
 def model_ten_tasks_encoder_in_config(config_ten_tasks_with_encoder_in_config):
     """MultiTaskModel with 10 tasks and encoder inside config.encoder_config."""
-    return MultiTaskModel(config=config_ten_tasks_with_encoder_in_config, dropout_rate=0.0)
+    return MultiTaskModel(config=config_ten_tasks_with_encoder_in_config)
 
 class TestMultiTaskModelWithCustomEncoder:
     """MultiTaskModel with a custom Keras layer as encoder (no TF Hub / HuggingFace)."""
