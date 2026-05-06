@@ -29,7 +29,8 @@ except ImportError:
 pytestmark = pytest.mark.skipif(not HAS_TF, reason="tensorflow not installed")
 
 RUN_HF_FROM_PT_INTEGRATION = os.getenv("MULTITASK_RUN_HF_FROM_PT_INTEGRATION", "0") == "1"
-HF_PT_ONLY_MODEL_ID = "sentence-transformers/multi-qa-distilbert-cos-v1"
+# HF_PT_ONLY_MODEL_ID = "sentence-transformers/multi-qa-distilbert-cos-v1"
+HF_PT_ONLY_MODEL_ID = "google/bert_uncased_L-2_H-128_A-2"
 
 class FakeEncoderLayer(tf.keras.layers.Layer):
     def __init__(self, output_dim, **kwargs):
