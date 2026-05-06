@@ -140,9 +140,9 @@ ecfg_tfhub_bert = EncoderConfig(
 )
 
 ecfg_small_bert = EncoderConfig(
-    encoder_identifier="https://tfhub.dev/tensorflow/small_bert/bert_en_uncased_L-4_H-512_A-8/2",
-    encoder_input_type=EncoderInputType.TFHUB_TOKENS,
-    encoder_integration=EncoderIntegration.TFHUB,
+    encoder_identifier="google/bert_uncased_L-2_H-128_A-2",
+    encoder_input_type=EncoderInputType.HUGGINGFACE_TOKENS,
+    encoder_integration=EncoderIntegration.HUGGINGFACE,
     trainable_encoder=True,
 )
 
