@@ -352,6 +352,36 @@ One propaganda branch stays separate while each discourse dimension forms a pair
 - Notes:
   - Strongest classification F1 so far, but regression quality drops substantially vs flat/grouped.
 
+#### Paper replication (hierarchical TFHub, 27 heads)
+
+Hierarchical multitask layout aligned with the paper-replication experiment: TFHub encoder, two dense shared layers, first split into three branches (`[3]`), then 18 propaganda + 1 WA + 8 discourse-binary heads (`[18, 1, 8]`). Trains all 27 classification outputs (18 propaganda techniques, `WA_bi`, and eight pairwise discourse binaries).
+
+- Experiment key: `paper_replication`
+- Structure: `[[3], [18, 1, 8]]`
+- Source: `cluster_runs/outputs/nopo-paper-replication.out`
+- Validation F1 during threshold search: 0.5277
+- Run metadata:
+  - Best epoch: 1 (lowest `val_loss` in log)
+  - Training stopped at epoch: 4 (early stopping)
+  - Train time: ~689s (~11m30s) across logged epochs (1712 steps/epoch, batch 128)
+  - Checkpoint restored: Yes (`Restoring model weights from the end of the best epoch: 1`)
+  - Hyperparameters (from log): 10 epochs max, lr `4e-05`, weight decay `0.01`, dropout `0.1`
+  - Thresholding mode: Enabled (per-task thresholds printed)
+  - Primary takeaway: Training overfits quickly (`val_loss` rises after epoch 1); aggregate classification metrics are weak (F1 ~0.23, AUC ~0.52) with high recall and low precision. Task-weight line shows one propaganda head (`Straw_Men`, index 17) with a very large weight (~26.7) vs ~0.003 for most others—worth checking imbalance handling vs intended paper setup.
+
+| Metric | Value |
+|---|---:|
+| Accuracy | 0.4531 |
+| Precision | 0.2232 |
+| Recall | 0.6361 |
+| F1 | 0.2285 |
+| AUC | 0.5232 |
+| Average Precision | 0.2189 |
+| MSE | None |
+| MAE | None |
+| R2 | None |
+| Pearson r | None |
+
 #### Quick Comparison Checklist
 
 - Classification side: does F1/AP improve vs `all_task_types` without major AUC drop?
@@ -362,16 +392,16 @@ One propaganda branch stays separate while each discourse dimension forms a pair
 
 Legend: `HIGH` marks the highest numeric value in a row, `LOW` marks the lowest numeric value in a row (ignoring `None`).
 
-| Metric | propaganda | propaganda_cols_binary | discourse_dims | discourse_binary | all_task_types | all_task_types_binary_prop | all_task_types_grouped | all_task_types_binary_prop_grouped | all_task_types_deep_grouped | all_task_types_binary_prop_deep_grouped | all_task_types_pair_by_dimension |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Structure | [[1]] | [[18]] | [[8]] | [[8]] | [[17]] | [[34]] | [[3], [1, 8, 8]] | [[3], [18, 8, 8]] | [[2], [1, 2], [1, 8, 8]] | [[2], [1, 2], [18, 8, 8]] | [[9], [1, 2, 2, 2, 2, 2, 2, 2, 2]] |
-| Accuracy | **LOW 0.0045** | 0.5396 | None | 0.5584 | 0.4956 | **HIGH 0.5626** | 0.4923 | 0.5554 | 0.5364 | 0.5254 | 0.5276 |
-| Precision | 0.0851 | **LOW 0.0343** | None | **HIGH 0.5965** | 0.5106 | 0.2265 | 0.4933 | 0.2265 | 0.4677 | 0.2255 | 0.5482 |
-| Recall | 0.5374 | 0.5175 | None | **HIGH 0.6965** | **LOW 0.5004** | 0.5916 | 0.5156 | 0.5568 | 0.5665 | 0.5554 | 0.6238 |
-| F1 | 0.1357 | **LOW 0.0500** | None | **HIGH 0.5986** | 0.4335 | 0.2302 | 0.4360 | 0.2246 | 0.4607 | 0.2133 | 0.5395 |
-| AUC | **LOW 0.4820** | 0.5421 | None | 0.5227 | 0.6125 | 0.5939 | **HIGH 0.6264** | 0.5689 | 0.5153 | 0.5600 | 0.5779 |
-| Average Precision | **LOW 0.0277** | 0.0335 | None | 0.5640 | 0.5763 | 0.2321 | **HIGH 0.5909** | 0.2313 | 0.4998 | 0.2269 | 0.5268 |
-| MSE | None | None | 2.7409 | None | 2.7754 | **LOW 2.7137** | 2.7429 | 2.7361 | **HIGH 3.0726** | 2.7556 | 3.0417 |
-| MAE | None | None | 1.2550 | None | 1.2688 | **LOW 1.2471** | 1.2669 | 1.2532 | **HIGH 1.3497** | 1.2610 | 1.3457 |
-| R2 | None | None | 0.1167 | None | 0.1037 | **HIGH 0.1363** | 0.1142 | 0.1269 | 0.0124 | 0.1161 | **LOW -0.0001** |
-| Pearson r | None | None | 0.3575 | None | 0.3235 | **HIGH 0.3608** | 0.3404 | 0.3526 | **LOW 0.1574** | 0.3371 | 0.1824 |
+| Metric | propaganda | propaganda_cols_binary | discourse_dims | discourse_binary | all_task_types | all_task_types_binary_prop | all_task_types_grouped | all_task_types_binary_prop_grouped | all_task_types_deep_grouped | all_task_types_binary_prop_deep_grouped | all_task_types_pair_by_dimension | paper_replication |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Structure | [[1]] | [[18]] | [[8]] | [[8]] | [[17]] | [[34]] | [[3], [1, 8, 8]] | [[3], [18, 8, 8]] | [[2], [1, 2], [1, 8, 8]] | [[2], [1, 2], [18, 8, 8]] | [[9], [1, 2, 2, 2, 2, 2, 2, 2, 2]] | [[3], [18, 1, 8]] |
+| Accuracy | **LOW 0.0045** | 0.5396 | None | 0.5584 | 0.4956 | **HIGH 0.5626** | 0.4923 | 0.5554 | 0.5364 | 0.5254 | 0.5276 | 0.4531 |
+| Precision | 0.0851 | **LOW 0.0343** | None | **HIGH 0.5965** | 0.5106 | 0.2265 | 0.4933 | 0.2265 | 0.4677 | 0.2255 | 0.5482 | 0.2232 |
+| Recall | 0.5374 | 0.5175 | None | **HIGH 0.6965** | **LOW 0.5004** | 0.5916 | 0.5156 | 0.5568 | 0.5665 | 0.5554 | 0.6238 | 0.6361 |
+| F1 | 0.1357 | **LOW 0.0500** | None | **HIGH 0.5986** | 0.4335 | 0.2302 | 0.4360 | 0.2246 | 0.4607 | 0.2133 | 0.5395 | 0.2285 |
+| AUC | **LOW 0.4820** | 0.5421 | None | 0.5227 | 0.6125 | 0.5939 | **HIGH 0.6264** | 0.5689 | 0.5153 | 0.5600 | 0.5779 | 0.5232 |
+| Average Precision | **LOW 0.0277** | 0.0335 | None | 0.5640 | 0.5763 | 0.2321 | **HIGH 0.5909** | 0.2313 | 0.4998 | 0.2269 | 0.5268 | 0.2189 |
+| MSE | None | None | 2.7409 | None | 2.7754 | **LOW 2.7137** | 2.7429 | 2.7361 | **HIGH 3.0726** | 2.7556 | 3.0417 | None |
+| MAE | None | None | 1.2550 | None | 1.2688 | **LOW 1.2471** | 1.2669 | 1.2532 | **HIGH 1.3497** | 1.2610 | 1.3457 | None |
+| R2 | None | None | 0.1167 | None | 0.1037 | **HIGH 0.1363** | 0.1142 | 0.1269 | 0.0124 | 0.1161 | **LOW -0.0001** | None |
+| Pearson r | None | None | 0.3575 | None | 0.3235 | **HIGH 0.3608** | 0.3404 | 0.3526 | **LOW 0.1574** | 0.3371 | 0.1824 | None |
