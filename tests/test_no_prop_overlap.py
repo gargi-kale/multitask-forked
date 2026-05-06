@@ -38,11 +38,7 @@ Experiments:
     all_task_types_deep_grouped
                         All task types with deep hierarchy (all -> some -> tasks)
     paper_replication   Propaganda binary cols + WA_bi + binary discourse, grouped hierarchy
-    paper_replication_alt
-                        Propaganda binary cols + WA_bi + regression discourse, grouped hierarchy
-    paper_replication_max_pool
-                        Paper replication with max-pooled propaganda aggregate output
-    output_pooling      Output pooling on propaganda (not yet implemented)
+                        Max-pooled propaganda
     all                 Run all experiments in sequence
 
 Options:
@@ -156,7 +152,6 @@ ENCODER_CONFIGS = {
     "small-bert": ecfg_small_bert,
 }
 
-
 # ---------------------------------------------------------------------------
 # Load splits
 # ---------------------------------------------------------------------------
@@ -251,6 +246,8 @@ def run_experiment(
     optimize_thresholds: bool = True,
     verbose: int = 1,
     show_structure: bool = True,
+    trainer: Optional[Trainer] = None,
+    training_config: Optional[TrainingConfig] = None,
 ) -> Dict[str, Any]:
     model = MultiTaskModel(config)
     if show_structure:
@@ -263,14 +260,15 @@ def run_experiment(
                 f"path={info['parent_branch_path']}"
             )
 
-    trainer = Trainer(
-        model,
-        TrainingConfig(
+    if trainer is None:
+        # Allow experiments to inject a custom TrainingConfig while keeping a
+        # sensible default for all existing experiment calls.
+        resolved_training_config = training_config or TrainingConfig(
             epochs=epochs,
             batch_size=batch_size,
             learning_rate=learning_rate,
-        ),
-    )
+        )
+        trainer = Trainer(model, resolved_training_config)
 
     _, thresholds = trainer.fit(
         train_ds,
@@ -285,6 +283,7 @@ def run_experiment(
 
     results = trainer.evaluate(val_ds, thresholds=thresholds)
     print("Overall metrics:", results.get("overall_metrics", {}))
+    print("Task-specific metrics:", results.get("task_metrics", {}))
     return results
 
 
@@ -677,6 +676,14 @@ def run_all_task_types_deep_grouped(args: argparse.Namespace) -> None:
         show_structure=args.show_structure,
     )
 
+PAPER_TRAINING_CONFIG = TrainingConfig(
+    optimizer_type="adamw",
+    learning_rate=0.0003,
+    weight_decay_rate=0.01,
+    dropout_rate=0.4,
+    batch_size=256,
+    warmup_percent=5
+)
 
 def run_paper_replication(args: argparse.Namespace) -> None:
     print("\n=== Experiment: paper_replication ===")
@@ -694,80 +701,7 @@ def run_paper_replication(args: argparse.Namespace) -> None:
     )
     task_types = ["binary"] * len(all_task_names)
     num_classes_per_task = [2] * len(all_task_names)
-    config = ModelConfig(
-        task_structure=[
-            [3],
-            [len(propaganda_task_names), 1, len(discourse_task_names)],
-        ],
-        task_names=all_task_names,
-        task_types=task_types,
-        num_classes_per_task=num_classes_per_task,
-        encoder_config=encoder_config,
-    )
-    run_experiment(
-        config, train_ds, val_ds,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        optimize_thresholds=not args.no_optimize_thresh,
-        verbose=args.verbose,
-        show_structure=args.show_structure,
-    )
-
-
-def run_paper_replication_alt(args: argparse.Namespace) -> None:
-    print("\n=== Experiment: paper_replication_alt ===")
-    propaganda_task_names = list(PROPAGANDA_BINARY_TASK_NAMES)
-    discourse_task_names = list(DISCOURSE_REGRESSION_COLUMNS)
-    all_task_names = propaganda_task_names + ["WA_bi"] + discourse_task_names
-
-    encoder_config = ENCODER_CONFIGS[args.encoder]
-    train_ds, val_ds, _ = load_splits(
-        label_columns=all_task_names,
-        encoder_config=encoder_config,
-        batch_size=args.batch_size,
-        data_dir=args.data_dir,
-        label_column_map=PROPAGANDA_BINARY_LABEL_MAP,
-    )
-    task_types = ["binary"] * (len(propaganda_task_names) + 1) + ["regression"] * len(discourse_task_names)
-    num_classes_per_task = [2] * (len(propaganda_task_names) + 1) + [1] * len(discourse_task_names)
-    config = ModelConfig(
-        task_structure=[
-            [3],
-            [len(propaganda_task_names), 1, len(discourse_task_names)],
-        ],
-        task_names=all_task_names,
-        task_types=task_types,
-        num_classes_per_task=num_classes_per_task,
-        encoder_config=encoder_config,
-    )
-    run_experiment(
-        config, train_ds, val_ds,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        optimize_thresholds=not args.no_optimize_thresh,
-        verbose=args.verbose,
-        show_structure=args.show_structure,
-    )
-
-
-def run_paper_replication_max_pool(args: argparse.Namespace) -> None:
-    print("\n=== Experiment: paper_replication_max_pool ===")
-    propaganda_task_names = list(PROPAGANDA_BINARY_TASK_NAMES)
-    discourse_task_names = list(DISCOURSE_BINARY_COLUMNS)
-    all_task_names = propaganda_task_names + ["WA_bi"] + discourse_task_names
-
-    encoder_config = ENCODER_CONFIGS[args.encoder]
-    train_ds, val_ds, _ = load_splits(
-        label_columns=all_task_names,
-        encoder_config=encoder_config,
-        batch_size=args.batch_size,
-        data_dir=args.data_dir,
-        label_column_map=PROPAGANDA_BINARY_LABEL_MAP,
-    )
-    task_types = ["binary"] * len(all_task_names)
-    num_classes_per_task = [2] * len(all_task_names)
+    
     config = ModelConfig(
         task_structure=[
             [3],
@@ -780,6 +714,8 @@ def run_paper_replication_max_pool(args: argparse.Namespace) -> None:
             "propaganda_max_pool": {
                 "tasks": propaganda_task_names,
                 "strategy": "max",
+                "task_type": "binary",
+                "num_classes": 2,
             },
         },
         encoder_config=encoder_config,
@@ -792,12 +728,8 @@ def run_paper_replication_max_pool(args: argparse.Namespace) -> None:
         optimize_thresholds=not args.no_optimize_thresh,
         verbose=args.verbose,
         show_structure=args.show_structure,
+        training_config=PAPER_TRAINING_CONFIG,
     )
-
-
-def run_output_pooling(args: argparse.Namespace) -> None:
-    print("\n=== Experiment: output_pooling ===")
-    print("Not yet implemented.")
 
 
 EXPERIMENTS = {
@@ -813,10 +745,7 @@ EXPERIMENTS = {
     "all_task_types_pair_by_dimension": run_all_task_types_pair_by_dimension,
     "all_task_types_grouped": run_all_task_types_grouped,
     "all_task_types_deep_grouped": run_all_task_types_deep_grouped,
-    "paper_replication": run_paper_replication,
-    "paper_replication_alt": run_paper_replication_alt,
-    "paper_replication_max_pool": run_paper_replication_max_pool,
-    "output_pooling": run_output_pooling,
+    "paper_replication": run_paper_replication
 }
 
 
