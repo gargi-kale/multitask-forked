@@ -1,11 +1,14 @@
+import os
+import sys
 import pytest
+from unittest.mock import MagicMock, patch
 
 ENCODER_OUTPUT_DIM = 64
 BATCH_SIZE = 4
 
 try:
     import tensorflow as tf
-    from multitask.config import EncoderConfig, EncoderInputType, ModelConfig
+    from multitask.config import EncoderConfig, EncoderInputType, EncoderIntegration, ModelConfig
     from multitask.models.hierarchical import MultiTaskModel
     HAS_TF = True
 
@@ -17,7 +20,17 @@ except ImportError:
     EncoderConfig = None
     EncoderInputType = None
 
+try:
+    import transformers  # noqa: F401
+    HAS_TRANSFORMERS = True
+except ImportError:
+    HAS_TRANSFORMERS = False
+
 pytestmark = pytest.mark.skipif(not HAS_TF, reason="tensorflow not installed")
+
+RUN_HF_FROM_PT_INTEGRATION = os.getenv("MULTITASK_RUN_HF_FROM_PT_INTEGRATION", "0") == "1"
+# HF_PT_ONLY_MODEL_ID = "sentence-transformers/multi-qa-distilbert-cos-v1"
+HF_PT_ONLY_MODEL_ID = "google/bert_uncased_L-2_H-128_A-2"
 
 class FakeEncoderLayer(tf.keras.layers.Layer):
     def __init__(self, output_dim, **kwargs):
@@ -106,13 +119,12 @@ def encoder_inputs():
     """Sample inputs matching the encoder contract: (batch_size, encoder_output_dim)"""
     return make_encoder_inputs()
 
-def _make_model(config, encoder=None, num_classes_per_task=None, dropout_rate=0.1, trainable_encoder=None):
+def _make_model(config, encoder=None, num_classes_per_task=None, trainable_encoder=None):
     """Build MultiTaskModel; pass encoder= for a custom Keras encoder."""
     return MultiTaskModel(
         config=config,
         encoder=encoder,
         num_classes_per_task=num_classes_per_task,
-        dropout_rate=dropout_rate,
         trainable_encoder=trainable_encoder,
     )
 
@@ -130,12 +142,12 @@ def model_with_encoder_ten_tasks(config_ten_tasks, encoder_instance):
 @pytest.fixture
 def model_two_tasks_encoder_in_config(config_two_tasks_with_encoder_in_config):
     """MultiTaskModel with custom encoder inside config.encoder_config."""
-    return MultiTaskModel(config=config_two_tasks_with_encoder_in_config, dropout_rate=0.0)
+    return MultiTaskModel(config=config_two_tasks_with_encoder_in_config)
 
 @pytest.fixture
 def model_ten_tasks_encoder_in_config(config_ten_tasks_with_encoder_in_config):
     """MultiTaskModel with 10 tasks and encoder inside config.encoder_config."""
-    return MultiTaskModel(config=config_ten_tasks_with_encoder_in_config, dropout_rate=0.0)
+    return MultiTaskModel(config=config_ten_tasks_with_encoder_in_config)
 
 class TestMultiTaskModelWithCustomEncoder:
     """MultiTaskModel with a custom Keras layer as encoder (no TF Hub / HuggingFace)."""
@@ -242,3 +254,109 @@ class TestMultiTaskModelWithEncoderInConfig:
         assert set(restored.keys()) == set(out.keys())
         for name in out:
             tf.debugging.assert_near(restored[name], out[name])
+
+
+_PT_ONLY_ERROR = OSError(
+    "bert-base-uncased does not appear to have a file named tf_model.h5, "
+    "model.safetensors.index.json, model.safetensors, tf_model.h5.index.json or tf_model.h5"
+)
+
+
+def _mock_transformers(from_pretrained_side_effect):
+    """Return a sys.modules patch that replaces transformers with a mock TFAutoModel."""
+    mock_tf_auto = MagicMock()
+    mock_tf_auto.from_pretrained.side_effect = from_pretrained_side_effect
+    return patch.dict(sys.modules, {"transformers": MagicMock(TFAutoModel=mock_tf_auto)})
+
+
+class TestHuggingFaceFromPt:
+    """from_pt error handling when a HuggingFace model only ships PyTorch weights."""
+    def test_raises_informative_error_without_from_pt(self):
+        """OSError with no TF weights becomes a clear message pointing to from_pt=True."""
+        config = ModelConfig(
+            task_structure=[[2]],
+            encoder_config=EncoderConfig(
+                encoder_identifier="bert-base-uncased",
+                encoder_input_type=EncoderInputType.HUGGINGFACE_TOKENS,
+                encoder_integration=EncoderIntegration.HUGGINGFACE,
+                from_pt=False,
+            ),
+        )
+        with _mock_transformers(_PT_ONLY_ERROR):
+            with pytest.raises(OSError, match="from_pt=True"):
+                MultiTaskModel(config=config)
+
+    def test_original_error_raised_when_from_pt_true(self):
+        """When from_pt=True an OSError is not wrapped — the original is re-raised."""
+        config = ModelConfig(
+            task_structure=[[2]],
+            encoder_config=EncoderConfig(
+                encoder_identifier="bert-base-uncased",
+                encoder_input_type=EncoderInputType.HUGGINGFACE_TOKENS,
+                encoder_integration=EncoderIntegration.HUGGINGFACE,
+                from_pt=True,
+            ),
+        )
+        with _mock_transformers(OSError("network timeout")):
+            with pytest.raises(OSError, match="network timeout"):
+                MultiTaskModel(config=config)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not HAS_TRANSFORMERS, reason="transformers not installed")
+@pytest.mark.skipif(
+    not RUN_HF_FROM_PT_INTEGRATION,
+    reason="set MULTITASK_RUN_HF_FROM_PT_INTEGRATION=1 to run networked HF from_pt integration tests",
+)
+class TestHuggingFaceFromPtIntegration:
+    """Networked integration test for models that may only publish PyTorch weights."""
+
+    def test_real_model_without_from_pt_raises_guidance(self):
+        """Real HF fetch with from_pt=False should surface guidance for PyTorch-only models."""
+        config = ModelConfig(
+            task_structure=[[2]],
+            encoder_config=EncoderConfig(
+                encoder_identifier=HF_PT_ONLY_MODEL_ID,
+                encoder_input_type=EncoderInputType.HUGGINGFACE_TOKENS,
+                encoder_integration=EncoderIntegration.HUGGINGFACE,
+                from_pt=False,
+            ),
+        )
+        try:
+            MultiTaskModel(config=config)
+        except OSError as exc:
+            assert "from_pt=True" in str(exc)
+        except ValueError as exc:
+            if "Unrecognized configuration class" in str(exc) and "TFAutoModel" in str(exc):
+                pytest.skip(
+                    f"Model '{HF_PT_ONLY_MODEL_ID}' has no TensorFlow architecture in transformers; "
+                    "choose a model with TF architecture support via MULTITASK_HF_PT_ONLY_MODEL_ID."
+                )
+            raise
+        else:
+            pytest.skip(
+                f"Model '{HF_PT_ONLY_MODEL_ID}' loaded TensorFlow weights directly; "
+                "pick a PyTorch-only model via MULTITASK_HF_PT_ONLY_MODEL_ID."
+            )
+
+    def test_real_model_with_from_pt_true_loads_without_error(self):
+        """Real HF fetch with from_pt=True should initialize without wrapping TF-weight errors."""
+        config = ModelConfig(
+            task_structure=[[2]],
+            encoder_config=EncoderConfig(
+                encoder_identifier=HF_PT_ONLY_MODEL_ID,
+                encoder_input_type=EncoderInputType.HUGGINGFACE_TOKENS,
+                encoder_integration=EncoderIntegration.HUGGINGFACE,
+                from_pt=True,
+            ),
+        )
+        try:
+            model = MultiTaskModel(config=config)
+        except ValueError as exc:
+            if "Unrecognized configuration class" in str(exc) and "TFAutoModel" in str(exc):
+                pytest.skip(
+                    f"Model '{HF_PT_ONLY_MODEL_ID}' has no TensorFlow architecture in transformers; "
+                    "cannot validate from_pt conversion for this model family."
+                )
+            raise
+        assert model.uses_encoder is True

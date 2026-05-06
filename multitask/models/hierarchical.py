@@ -197,12 +197,26 @@ class MultiTaskModel(tf.keras.Model):
                 # loading TF models from .safetensors with safetensors>=0.5 (safe_open
                 # object is not iterable in load_pytorch_state_dict_in_tf2_model).
                 try:
-                    self.encoder = TFAutoModel.from_pretrained(
-                        encoder_identifier, name='encoder', use_safetensors=False
-                    )
-                except TypeError:
-                    # Older transformers may not accept use_safetensors
-                    self.encoder = TFAutoModel.from_pretrained(encoder_identifier, name='encoder')
+                    try:
+                        self.encoder = TFAutoModel.from_pretrained(
+                            encoder_identifier, name='encoder',
+                            use_safetensors=False, from_pt=self.encoder_config.from_pt
+                        )
+                    except TypeError:
+                        # Older transformers may not accept use_safetensors
+                        self.encoder = TFAutoModel.from_pretrained(
+                            encoder_identifier, name='encoder',
+                            from_pt=self.encoder_config.from_pt
+                        )
+                except OSError as e:
+                    if not self.encoder_config.from_pt:
+                        raise OSError(
+                            f"Could not load TensorFlow weights for '{encoder_identifier}'. "
+                            "This model may only ship PyTorch weights. "
+                            "Try setting from_pt=True in EncoderConfig to convert PyTorch weights on the fly: "
+                            f"EncoderConfig(encoder_identifier='{encoder_identifier}', from_pt=True)"
+                        ) from e
+                    raise
                 self.encoder.trainable = trainable_encoder
                 self.encoder_input_type = EncoderInputType.HUGGINGFACE_TOKENS
                 self.encoder_type = EncoderIntegration.HUGGINGFACE.value
