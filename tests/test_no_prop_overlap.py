@@ -38,6 +38,10 @@ Experiments:
     all_task_types_deep_grouped
                         All task types with deep hierarchy (all -> some -> tasks)
     paper_replication   Propaganda binary cols + WA_bi + binary discourse, grouped hierarchy
+    paper_replication_alt
+                        Propaganda binary cols + WA_bi + regression discourse, grouped hierarchy
+    paper_replication_max_pool
+                        Paper replication with max-pooled propaganda aggregate output
     output_pooling      Output pooling on propaganda (not yet implemented)
     all                 Run all experiments in sequence
 
@@ -711,6 +715,86 @@ def run_paper_replication(args: argparse.Namespace) -> None:
     )
 
 
+def run_paper_replication_alt(args: argparse.Namespace) -> None:
+    print("\n=== Experiment: paper_replication_alt ===")
+    propaganda_task_names = list(PROPAGANDA_BINARY_TASK_NAMES)
+    discourse_task_names = list(DISCOURSE_REGRESSION_COLUMNS)
+    all_task_names = propaganda_task_names + ["WA_bi"] + discourse_task_names
+
+    encoder_config = ENCODER_CONFIGS[args.encoder]
+    train_ds, val_ds, _ = load_splits(
+        label_columns=all_task_names,
+        encoder_config=encoder_config,
+        batch_size=args.batch_size,
+        data_dir=args.data_dir,
+        label_column_map=PROPAGANDA_BINARY_LABEL_MAP,
+    )
+    task_types = ["binary"] * (len(propaganda_task_names) + 1) + ["regression"] * len(discourse_task_names)
+    num_classes_per_task = [2] * (len(propaganda_task_names) + 1) + [1] * len(discourse_task_names)
+    config = ModelConfig(
+        task_structure=[
+            [3],
+            [len(propaganda_task_names), 1, len(discourse_task_names)],
+        ],
+        task_names=all_task_names,
+        task_types=task_types,
+        num_classes_per_task=num_classes_per_task,
+        encoder_config=encoder_config,
+    )
+    run_experiment(
+        config, train_ds, val_ds,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        optimize_thresholds=not args.no_optimize_thresh,
+        verbose=args.verbose,
+        show_structure=args.show_structure,
+    )
+
+
+def run_paper_replication_max_pool(args: argparse.Namespace) -> None:
+    print("\n=== Experiment: paper_replication_max_pool ===")
+    propaganda_task_names = list(PROPAGANDA_BINARY_TASK_NAMES)
+    discourse_task_names = list(DISCOURSE_BINARY_COLUMNS)
+    all_task_names = propaganda_task_names + ["WA_bi"] + discourse_task_names
+
+    encoder_config = ENCODER_CONFIGS[args.encoder]
+    train_ds, val_ds, _ = load_splits(
+        label_columns=all_task_names,
+        encoder_config=encoder_config,
+        batch_size=args.batch_size,
+        data_dir=args.data_dir,
+        label_column_map=PROPAGANDA_BINARY_LABEL_MAP,
+    )
+    task_types = ["binary"] * len(all_task_names)
+    num_classes_per_task = [2] * len(all_task_names)
+    config = ModelConfig(
+        task_structure=[
+            [3],
+            [len(propaganda_task_names), 1, len(discourse_task_names)],
+        ],
+        task_names=all_task_names,
+        task_types=task_types,
+        num_classes_per_task=num_classes_per_task,
+        output_pools={
+            "propaganda_max_pool": {
+                "tasks": propaganda_task_names,
+                "strategy": "max",
+            },
+        },
+        encoder_config=encoder_config,
+    )
+    run_experiment(
+        config, train_ds, val_ds,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        optimize_thresholds=not args.no_optimize_thresh,
+        verbose=args.verbose,
+        show_structure=args.show_structure,
+    )
+
+
 def run_output_pooling(args: argparse.Namespace) -> None:
     print("\n=== Experiment: output_pooling ===")
     print("Not yet implemented.")
@@ -730,6 +814,8 @@ EXPERIMENTS = {
     "all_task_types_grouped": run_all_task_types_grouped,
     "all_task_types_deep_grouped": run_all_task_types_deep_grouped,
     "paper_replication": run_paper_replication,
+    "paper_replication_alt": run_paper_replication_alt,
+    "paper_replication_max_pool": run_paper_replication_max_pool,
     "output_pooling": run_output_pooling,
 }
 
