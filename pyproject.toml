@@ -4,11 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "multitask"
-version = "0.1.0"
-description = "A flexible multi-task learning library for NLP with support for hierarchical task structures."
+version = "0.2.0"
+description = "A flexible multi-task learning library for natural language processing with support for hierarchical task structures."
 readme = "README.md"
 authors = [
-    {name = "Isaac D. Mehlhaff", email = "imehlhaff@uchicago.edu"},
+    {name = "Josephene Ginting"},
+    {name = "Eddie Ye Tian"},
+    {name = "Isaac D. Mehlhaff", email = "isaac.mehlhaff@gmail.com"},
     {name = "Marco Morucci", email = "moruccim@msu.edu"}
 ]
 license = "MIT"
