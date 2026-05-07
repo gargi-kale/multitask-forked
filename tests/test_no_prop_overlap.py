@@ -144,6 +144,7 @@ ecfg_small_bert = EncoderConfig(
     encoder_input_type=EncoderInputType.HUGGINGFACE_TOKENS,
     encoder_integration=EncoderIntegration.HUGGINGFACE,
     trainable_encoder=True,
+    from_pt=True
 )
 
 ENCODER_CONFIGS = {
