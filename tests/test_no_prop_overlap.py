@@ -708,6 +708,11 @@ def run_paper_replication(args: argparse.Namespace) -> None:
             [3],
             [len(propaganda_task_names), 1, len(discourse_task_names)],
         ],
+        shared_layer_sizes=[64, 32],       # two shared dense layers (128→64→32)
+        branch_layer_sizes=[
+            [32, 16],                      # task-type branches (32→32→16)
+            [16, 8],                       # task-specific branches (16→16→8)
+        ],
         task_names=all_task_names,
         task_types=task_types,
         num_classes_per_task=num_classes_per_task,
