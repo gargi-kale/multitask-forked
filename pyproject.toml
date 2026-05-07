@@ -40,9 +40,9 @@ dependencies = [
 
 [project.optional-dependencies]
 huggingface = [
-    "transformers>=4.30",
+    "transformers>=4.44,<5",
     "huggingface-hub>=0.36",
-    "torch>=2.0",
+    "torch==2.5.1",
     "diskcache>=5.0",
 ]
 openai = [
