@@ -782,10 +782,20 @@ class MultiTaskModel(tf.keras.Model):
             >>> # tensor shape might be [32, 14] for mixed binary/multiclass
             >>> # indices = {'task_0': (0, 1), 'task_1': (1, 2), 'task_2': (2, 7), ...}
         """
-        task_names = sorted(output_dict.keys())
+        # Use the model's task_names order so flatten/unflatten roundtrip
+        # exactly. Sorted alphabetical order would scramble columns relative
+        # to unflatten_outputs, which iterates self.task_names.
+        if self.task_names is not None:
+            ordered = [n for n in self.task_names if n in output_dict]
+            # Append any pool outputs (or extras) in stable alphabetical order
+            extras = sorted(k for k in output_dict.keys() if k not in ordered)
+            task_names = ordered + extras
+        else:
+            task_names = sorted(output_dict.keys())
+
         tensors = [output_dict[name] for name in task_names]
         concatenated = tf.concat(tensors, axis=1)
-        
+
         # Track where each task's output is
         task_indices = {}
         start = 0
@@ -793,7 +803,7 @@ class MultiTaskModel(tf.keras.Model):
             num_dims = output_dict[task_name].shape[-1]
             task_indices[task_name] = (start, start + num_dims)
             start += num_dims
-        
+
         return concatenated, task_indices
     
     def unflatten_outputs(
@@ -963,10 +973,16 @@ class MultiTaskModel(tf.keras.Model):
                     )
                 
                 # Validate each task's labels
-                for task_idx, task_name in enumerate(sorted(labels_dict.keys())):
+                # Iterate in original task_names order and look up config by the
+                # real index — alphabetical position is not the same as config position.
+                task_names_iter = self.task_names or sorted(labels_dict.keys())
+                for task_name in task_names_iter:
                     labels = labels_dict[task_name]
-                    task_type = self.config.get_task_type(task_idx)
-                    num_classes = self.config.get_num_classes_per_task(task_idx)
+                    real_idx = (self.task_names.index(task_name)
+                                if self.task_names else
+                                sorted(labels_dict.keys()).index(task_name))
+                    task_type = self.config.get_task_type(real_idx)
+                    num_classes = self.config.get_num_classes_per_task(real_idx)
                     
                     # Check tensor
                     if not tf.is_tensor(labels):

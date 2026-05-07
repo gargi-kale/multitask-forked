@@ -423,10 +423,14 @@ class Trainer:
         
         optimizer_kwargs = getattr(self.config, 'optimizer_kwargs', {}) or {}
         
+        merged_kwargs = dict(optimizer_kwargs)
+        if opt_type == 'adamw' and 'weight_decay' not in merged_kwargs:
+            merged_kwargs['weight_decay'] = self.config.weight_decay_rate
+
         if opt_type in optimizer_map:
             optimizer = optimizer_map[opt_type](
                 learning_rate=lr_schedule,
-                **optimizer_kwargs
+                **merged_kwargs
             )
         else:
             # get optimizer from keras registry for additional optimizers
@@ -596,7 +600,10 @@ class Trainer:
                     
                 fpr, tpr, thresh = roc_curve(y_task_true_valid, y_task_pred_valid)
                 optimal_threshold = thresh[np.argmax(tpr - fpr)]
-                
+
+                if not np.isfinite(optimal_threshold):
+                    optimal_threshold = float(np.clip(np.nanmax(y_task_pred_valid), 0.0, 1.0))
+
                 y_pred_binary = (y_task_pred_valid > optimal_threshold).astype(int)
                 thresholds[name] = float(optimal_threshold)
                 f1_scores[name] = float(f1_score(y_task_true_valid, y_pred_binary, average='weighted', zero_division=0))
@@ -626,9 +633,12 @@ class Trainer:
                         
                     fpr, tpr, thresh = roc_curve(y_col_true_valid, y_col_pred_valid)
                     opt_thresh = thresh[np.argmax(tpr - fpr)]
-                    
+
+                    if not np.isfinite(opt_thresh):
+                        opt_thresh = float(np.clip(np.nanmax(y_col_pred_valid), 0.0, 1.0))
+
                     y_col_binary = (y_col_pred_valid > opt_thresh).astype(int)
-                    f1 = f1_score(y_col_true_valid, y_col_binary, average='binary', zero_division=0)
+                    f1 = f1_score(y_col_true_valid, y_col_binary, average='weighted', zero_division=0)
                     
                     label_thresholds.append(float(opt_thresh))
                     label_f1s.append(float(f1))
@@ -676,9 +686,8 @@ class Trainer:
             if total_samples >= num_samples_to_check:
                 break
         
-        # Compute weights as inverse of sample counts, normalized
         task_weights = []
-        for task_name in sorted(task_names):
+        for task_name in task_names:
             count = max(task_sample_counts[task_name], 1)  # Avoid division by zero
             task_weights.append(1.0 / count)
         
@@ -730,9 +739,9 @@ class Trainer:
             if total_samples >= num_samples_to_check:
                 break
         
-        # Compute class weights for each task
+        # Compute class weights for each task.
         class_weights_list = []
-        for task_name in sorted(task_names):
+        for task_name in task_names:
             labels = np.array(task_labels[task_name])
             real_idx = list(self.model.task_names).index(task_name)
             task_type = self.model.config.get_task_type(real_idx)
@@ -867,12 +876,9 @@ class Trainer:
                 if task_weights is None:
                     print("Computing task weights from training data...")
                     task_weights = self._compute_task_weights(train_dataset)
-                    print(f"Task weights: {[f'{w:.3f}' for w in task_weights]}")
-                    
-                if task_weights is None:
-                    print("Computing task weights from training data...")
-                    task_weights = self._compute_task_weights(train_dataset)
-                    print(f"Task weights: {[f'{w:.3f}' for w in task_weights]}")
+                    named = dict(zip(self.model.task_names,
+                                     [round(w, 3) for w in task_weights]))
+                    print(f"Task weights (in task_names order): {named}")
                 
                 # Compute regression standardization stats from training data
                 regression_stats = self._compute_regression_stats(train_dataset)
@@ -1262,7 +1268,10 @@ class Trainer:
             # Compute binary metrics if thresholds available
             if use_thresholds is not None and task_type not in ('multiclass', 'regression'):
                 y_out_pred_binary = y_pred_binary_dict[name][valid_mask]
-                avg_method = 'binary' if task_type == 'binary' else 'weighted'
+                # Use weighted averaging consistently for binary and multilabel.
+                # Matches _find_optimal_thresholds and the paper's reported metric,
+                # eliminating the fit-time vs eval-time F1 gap.
+                avg_method = 'weighted'
                 
                 if 'accuracy' in metrics:
                     acc = accuracy_score(y_out_true_binary, y_out_pred_binary)
