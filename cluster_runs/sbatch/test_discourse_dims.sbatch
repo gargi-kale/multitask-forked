@@ -1,14 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=nopo-all-task-types-pair-by-dim
+#SBATCH --job-name=nopo-discourse-dims
 #SBATCH --output=cluster_runs/outputs/%x-%j.bootstrap.out
 #SBATCH --error=cluster_runs/outputs/%x-%j.bootstrap.err
 
 #SBATCH --account=ssd
 #SBATCH --partition=ssd-gpu
 #SBATCH --qos ssd
-#SBATCH -t 08:00:00
-#SBATCH --mem=64g
-#SBATCH --cpus-per-task=8
+#SBATCH -t 03:00:00
+#SBATCH --mem=32g
+#SBATCH --cpus-per-task=4
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
@@ -17,6 +17,13 @@
 #SBATCH --mail-user=jgint@rcc.uchicago.edu
 
 _repo_root="$SLURM_SUBMIT_DIR"
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ ! -f "${_repo_root}/tests/test_no_prop_overlap.py" ]]; then
+    _candidate_root="$(cd "${_script_dir}/../.." && pwd)"
+    if [[ -f "${_candidate_root}/tests/test_no_prop_overlap.py" ]]; then
+        _repo_root="${_candidate_root}"
+    fi
+fi
 if [[ ! -f "${_repo_root}/tests/test_no_prop_overlap.py" && -f "${_repo_root}/multitask/tests/test_no_prop_overlap.py" ]]; then
     _repo_root="${_repo_root}/multitask"
 fi
@@ -59,4 +66,4 @@ cd "${_repo_root}"
 export PYTHONPATH="${_repo_root}:${PYTHONPATH:-}"
 
 export USE_TORCH=0
-python tests/test_no_prop_overlap.py all_task_types_pair_by_dimension
+python tests/test_no_prop_overlap.py discourse_dims

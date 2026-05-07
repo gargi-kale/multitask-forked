@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Submit every .sbatch file in cluster_runs, except ptf-gpu.sbatch.
+# Submit every .sbatch file in cluster_runs/sbatch, except ptf-gpu.sbatch.
 # Usage:
-#   bash cluster_runs/submit_all_sbatch.sh
-#   bash cluster_runs/submit_all_sbatch.sh --dry-run
+#   bash cluster_runs/sbatch/submit_all_sbatch.sh
+#   bash cluster_runs/sbatch/submit_all_sbatch.sh --dry-run
 
 dry_run=0
 if [[ "${1:-}" == "--dry-run" ]]; then

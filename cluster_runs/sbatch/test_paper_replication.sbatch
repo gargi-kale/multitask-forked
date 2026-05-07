@@ -1,14 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=nopo-discourse-binary
+#SBATCH --job-name=nopo-paper-replication
 #SBATCH --output=cluster_runs/outputs/%x-%j.bootstrap.out
 #SBATCH --error=cluster_runs/outputs/%x-%j.bootstrap.err
 
 #SBATCH --account=ssd
 #SBATCH --partition=ssd-gpu
 #SBATCH --qos ssd
-#SBATCH -t 03:00:00
-#SBATCH --mem=32g
-#SBATCH --cpus-per-task=4
+#SBATCH -t 08:00:00
+#SBATCH --mem=64g
+#SBATCH --cpus-per-task=8
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
@@ -17,6 +17,13 @@
 #SBATCH --mail-user=jgint@rcc.uchicago.edu
 
 _repo_root="$SLURM_SUBMIT_DIR"
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ ! -f "${_repo_root}/tests/test_no_prop_overlap.py" ]]; then
+    _candidate_root="$(cd "${_script_dir}/../.." && pwd)"
+    if [[ -f "${_candidate_root}/tests/test_no_prop_overlap.py" ]]; then
+        _repo_root="${_candidate_root}"
+    fi
+fi
 if [[ ! -f "${_repo_root}/tests/test_no_prop_overlap.py" && -f "${_repo_root}/multitask/tests/test_no_prop_overlap.py" ]]; then
     _repo_root="${_repo_root}/multitask"
 fi
@@ -38,9 +45,6 @@ export XLA_FLAGS="--xla_gpu_cuda_data_dir=/software/cuda-12.2-el8-x86_64"
 nvidia-smi
 nvcc --version
 
-# Slurm copies this script to a spool dir, so `$(dirname "$0")` is useless.
-# Locate _setup.sh relative to $SLURM_SUBMIT_DIR (supports submission from
-# the repo root OR from cluster_runs/).
 _setup_sourced=
 for _d in "$_repo_root/cluster_runs" "$_repo_root"; do
     if [[ -f "$_d/_setup.sh" ]]; then
@@ -59,4 +63,4 @@ cd "${_repo_root}"
 export PYTHONPATH="${_repo_root}:${PYTHONPATH:-}"
 
 export USE_TORCH=0
-python tests/test_no_prop_overlap.py discourse_binary
+python tests/test_no_prop_overlap.py paper_replication --encoder small-bert

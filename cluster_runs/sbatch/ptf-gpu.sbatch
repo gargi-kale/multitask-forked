@@ -17,6 +17,13 @@
 #SBATCH --mail-user=jgint@rcc.uchicago.edu  # Replace jdoe with your CNET and be sure to include "@rcc"
 
 _repo_root="$SLURM_SUBMIT_DIR"
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ ! -d "${_repo_root}/cluster_runs" ]]; then
+    _candidate_root="$(cd "${_script_dir}/../.." && pwd)"
+    if [[ -d "${_candidate_root}/cluster_runs" ]]; then
+        _repo_root="${_candidate_root}"
+    fi
+fi
 if [[ ! -d "${_repo_root}/cluster_runs" && -d "${_repo_root}/multitask/cluster_runs" ]]; then
     _repo_root="${_repo_root}/multitask"
 fi
