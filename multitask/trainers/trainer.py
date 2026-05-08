@@ -256,10 +256,11 @@ class Trainer:
             For each task:
             1. Compute task-specific loss based on task type (binary/multiclass/multilabel)
             2. Apply mask to exclude invalid labels
-            3. Apply task weight to prioritize certain tasks
+            3. Apply task-type weight ν_k and within-type factor 1/|T_k|
             4. Accumulate into total loss
             
-            Final loss is averaged over all valid (non-masked) samples.
+            Final loss is the weighted sum over task-types (paper-style formulation),
+            not a global mean over valid entries.
             
             Note: During graph construction, Keras may pass SymbolicTensor objects
             instead of dicts. This function handles both cases.
@@ -293,8 +294,6 @@ class Trainer:
                     )
             
             total_loss = 0.0
-            has_any_valid = tf.constant(False)
-            
             for real_idx, task_name in enumerate(self.model.task_names):
                 y_task_true = y_true_dict[task_name]
                 y_task_pred = y_pred_dict[task_name]
@@ -385,9 +384,8 @@ class Trainer:
                 
                 weighted_loss = (loss_val * mask * task_weights_tf[real_idx] * within_type_factors_tf[real_idx])
                 total_loss += tf.reduce_sum(weighted_loss)
-                has_any_valid = tf.logical_or(has_any_valid, tf.reduce_any(mask > 0))
             
-            return tf.where(has_any_valid, total_loss, tf.constant(0.0, dtype=tf.float32))
+            return total_loss
         
         return dict_weighted_masked_loss
 
