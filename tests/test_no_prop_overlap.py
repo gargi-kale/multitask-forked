@@ -248,6 +248,7 @@ def run_experiment(
     verbose: int = 1,
     show_structure: bool = True,
     trainer: Optional[Trainer] = None,
+    task_type_mapping: Optional[Dict[str, str]] = None,
     training_config: Optional[TrainingConfig] = None,
 ) -> Dict[str, Any]:
     model = MultiTaskModel(config)
@@ -275,6 +276,7 @@ def run_experiment(
         train_ds,
         val_ds,
         num_tasks=len(config.task_names),
+        task_type_mapping=task_type_mapping,
         steps_per_epoch=len(train_ds),
         validation_steps=len(val_ds),
         optimize_thresholds=optimize_thresholds,
@@ -674,7 +676,7 @@ def run_all_task_types_deep_grouped(args: argparse.Namespace) -> None:
         learning_rate=args.learning_rate,
         optimize_thresholds=not args.no_optimize_thresh,
         verbose=args.verbose,
-        show_structure=args.show_structure,
+        show_structure=args.show_structure
     )
 
 PAPER_TRAINING_CONFIG = TrainingConfig(
@@ -702,6 +704,12 @@ def run_paper_replication(args: argparse.Namespace) -> None:
     )
     task_types = ["binary"] * len(all_task_names)
     num_classes_per_task = [2] * len(all_task_names)
+
+    task_type_mapping = {
+        **{task_name: "propaganda_binary" for task_name in propaganda_task_names},
+        "WA_bi": "wa_bi",
+        **{task_name: "discourse" for task_name in discourse_task_names},
+    }
     
     config = ModelConfig(
         task_structure=[
@@ -731,6 +739,7 @@ def run_paper_replication(args: argparse.Namespace) -> None:
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
+        task_type_mapping=task_type_mapping,
         optimize_thresholds=not args.no_optimize_thresh,
         verbose=args.verbose,
         show_structure=args.show_structure,
