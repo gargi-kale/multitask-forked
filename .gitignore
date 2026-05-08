@@ -183,3 +183,5 @@ tests_model/
 
 # Notes
 notes/
+
+.venv-mrjob
