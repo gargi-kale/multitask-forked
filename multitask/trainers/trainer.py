@@ -1650,11 +1650,16 @@ class Trainer:
             >>> # Continue training with restored optimizer state
             >>> history, new_thresholds = trainer.fit(train_ds, val_ds, num_tasks=10)
         """
-        from ..models.persistence import load_model
-        
+        from ..models.persistence import load_model, _get_build_dummy_input
+
         # Load model (includes weights, config, encoder, AND thresholds if saved)
         model, thresholds = load_model(filepath, encoder=encoder)
-        
+
+        # Reload metadata so we can build encoder-appropriate dummy inputs below.
+        # load_model already validated this file exists.
+        with open(os.path.join(filepath, 'metadata.json'), 'r') as f:
+            metadata = json.load(f)
+
         # Load training config if available
         training_config_path = os.path.join(filepath, 'training_config.json')
         if os.path.exists(training_config_path):
@@ -1664,26 +1669,27 @@ class Trainer:
         else:
             # Use default config
             config = TrainingConfig()
-        
+
         # Create trainer
         trainer = Trainer(model=model, config=config)
-        
+
         # Attach thresholds if loaded
         if thresholds is not None:
             trainer.thresholds = thresholds
-        
-        # Compile model if requested (needed for optimizer loading)
+
+        # Compile model if requested (needed for optimizer loading).
+        # The compile loss here is a stand-in: the real multi-task loss requires
+        # class/task weights derived from training data, which fit() computes.
+        # Calling fit() recompiles with the proper loss before training begins.
         if compile_model:
-            # Build a basic loss function for compilation
-            # User will need to call fit() which rebuilds with proper weights
-            def dummy_loss(y_true, y_pred):
-                return tf.reduce_mean(y_pred)  # Placeholder
-            
+            def _stub_loss_for_optimizer_restore(y_true, y_pred):
+                return tf.reduce_mean(y_pred)
+
             model.compile(
                 optimizer=trainer._build_optimizer(steps_per_epoch=100),
-                loss=dummy_loss
+                loss=_stub_loss_for_optimizer_restore
             )
-        
+
         # Load optimizer state if available and requested
         if load_optimizer and compile_model:
             optimizer_weights_path = os.path.join(filepath, 'optimizer.pkl')
@@ -1692,27 +1698,15 @@ class Trainer:
                     import pickle
                     with open(optimizer_weights_path, 'rb') as f:
                         optimizer_weights = pickle.load(f)
-                    
+
                     # Need to call the model once to initialize optimizer variables
-                    # This is a TensorFlow requirement before setting optimizer weights
-                    dummy_input = tf.zeros((1, 128))  # Placeholder
-                    if model.uses_encoder:
-                        if model.encoder_type == 'huggingface':
-                            dummy_input = {
-                                'input_ids': tf.zeros((1, 128), dtype=tf.int32),
-                                'attention_mask': tf.ones((1, 128), dtype=tf.int32),
-                                'token_type_ids': tf.zeros((1, 128), dtype=tf.int32),
-                            }
-                        else:
-                            dummy_input = {
-                                'input_word_ids': tf.zeros((1, 128), dtype=tf.int32),
-                                'input_mask': tf.ones((1, 128), dtype=tf.int32),
-                                'input_type_ids': tf.zeros((1, 128), dtype=tf.int32),
-                            }
-                    
+                    # before set_weights. Reuse the same dummy-input helper used
+                    # at load time so the input shape matches the encoder.
+                    dummy_input = _get_build_dummy_input(model, metadata)
+
                     with tf.GradientTape() as tape:
                         _ = model(dummy_input, training=True)
-                    
+
                     # Now set optimizer weights
                     model.optimizer.set_weights(optimizer_weights)
                     print(f"  - Optimizer state restored")
