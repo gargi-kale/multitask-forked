@@ -251,7 +251,19 @@ def run_experiment(
     task_type_mapping: Optional[Dict[str, str]] = None,
     training_config: Optional[TrainingConfig] = None,
 ) -> Dict[str, Any]:
-    model = MultiTaskModel(config)
+    # Resolve the TrainingConfig before building the model so we can pass
+    # dropout_rate into MultiTaskModel — the model is constructed before the
+    # Trainer, so the trainer can't push it in later.
+    if trainer is None:
+        resolved_training_config = training_config or TrainingConfig(
+            epochs=epochs,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+        )
+    else:
+        resolved_training_config = trainer.config
+
+    model = MultiTaskModel(config, dropout_rate=resolved_training_config.dropout_rate)
     if show_structure:
         print("\nModel structure:")
         print(model.summary_tree())
@@ -263,13 +275,6 @@ def run_experiment(
             )
 
     if trainer is None:
-        # Allow experiments to inject a custom TrainingConfig while keeping a
-        # sensible default for all existing experiment calls.
-        resolved_training_config = training_config or TrainingConfig(
-            epochs=epochs,
-            batch_size=batch_size,
-            learning_rate=learning_rate,
-        )
         trainer = Trainer(model, resolved_training_config)
 
     _, thresholds = trainer.fit(

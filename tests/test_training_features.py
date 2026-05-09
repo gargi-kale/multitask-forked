@@ -196,11 +196,10 @@ class TestDropoutBehavior:
             task_structure=[[2]],
             task_names=["a", "b"],
             task_types=["binary", "binary"],
-            dropout_rate=0.5,
             shared_layer_sizes=[32],
             default_layer_sizes=[16],
         )
-        model = MultiTaskModel(config=config, embedding_dim=EMB_DIM)
+        model = MultiTaskModel(config=config, embedding_dim=EMB_DIM, dropout_rate=0.5)
         cfg = TrainingConfig(
             epochs=2, early_stopping=False,
             use_lr_schedule=False, use_warmup=False,
@@ -216,11 +215,10 @@ class TestDropoutBehavior:
             task_structure=[[1]],
             task_names=["a"],
             task_types=["binary"],
-            dropout_rate=0.9,
             shared_layer_sizes=[64],
             default_layer_sizes=[32],
         )
-        model = MultiTaskModel(config=config, embedding_dim=EMB_DIM)
+        model = MultiTaskModel(config=config, embedding_dim=EMB_DIM, dropout_rate=0.9)
         x = tf.random.normal((32, EMB_DIM), seed=0)
         out1 = model(x, training=True)["a"].numpy()
         out2 = model(x, training=True)["a"].numpy()
@@ -235,11 +233,10 @@ class TestDropoutBehavior:
             task_structure=[[1]],
             task_names=["a"],
             task_types=["binary"],
-            dropout_rate=0.5,
             shared_layer_sizes=[32],
             default_layer_sizes=[16],
         )
-        model = MultiTaskModel(config=config, embedding_dim=EMB_DIM)
+        model = MultiTaskModel(config=config, embedding_dim=EMB_DIM, dropout_rate=0.5)
         x = tf.random.normal((8, EMB_DIM), seed=1)
         out1 = model(x, training=False)["a"].numpy()
         out2 = model(x, training=False)["a"].numpy()
@@ -250,9 +247,8 @@ class TestDropoutBehavior:
             task_structure=[[1]],
             task_names=["a"],
             task_types=["binary"],
-            dropout_rate=0.0,
         )
-        model = MultiTaskModel(config=config, embedding_dim=EMB_DIM)
+        model = MultiTaskModel(config=config, embedding_dim=EMB_DIM, dropout_rate=0.0)
         x = tf.random.normal((4, EMB_DIM))
         out = model(x, training=False)
         assert out["a"].shape == (4, 1)
