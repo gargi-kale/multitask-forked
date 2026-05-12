@@ -57,7 +57,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -232,6 +232,51 @@ def load_splits(
     return build("train"), build("val"), build("test")
 
 
+def compute_full_train_binary_class_weights(
+    *,
+    data_dir: str,
+    task_names: Sequence[str],
+    label_column_map: Optional[Dict[str, str]] = None,
+    prefix: str = "no_prop_overlap_",
+    mask_value: float = -1.0,
+    na_strings: Tuple[str, ...] = ("NA", "na", "NaN", ""),
+) -> List[Dict[int, float]]:
+    """Compute binary class weights from the full train CSV.
+
+    Uses the same weighting rule as ``Trainer._compute_class_weights`` for
+    binary tasks: ``w_c = N_valid / (2 * count_c)``, with a 0.001 floor for
+    absent classes and uniform ``{0: 1.0, 1: 1.0}`` when no valid labels exist.
+    """
+    label_column_map = label_column_map or {}
+    train_path = f"{data_dir}/{prefix}train.csv"
+    df = pd.read_csv(train_path)
+
+    class_weights: List[Dict[int, float]] = []
+    for task_name in task_names:
+        source_col = label_column_map.get(task_name, task_name)
+        s = df[source_col].replace(list(na_strings), np.nan)
+        vals = pd.to_numeric(s, errors="coerce").to_numpy(dtype=np.float32)
+        vals = np.where(np.isnan(vals), mask_value, vals)
+
+        valid = vals[vals != mask_value]
+        if valid.size == 0:
+            class_weights.append({0: 1.0, 1: 1.0})
+            continue
+
+        class_counts = np.bincount(valid.astype(int), minlength=2)
+        n_valid = int(valid.size)
+        weights_for_task: Dict[int, float] = {}
+        for class_idx in (0, 1):
+            count = int(class_counts[class_idx])
+            if count == 0:
+                weights_for_task[class_idx] = 0.001
+            else:
+                weights_for_task[class_idx] = n_valid / (2.0 * count)
+        class_weights.append(weights_for_task)
+
+    return class_weights
+
+
 # ---------------------------------------------------------------------------
 # Shared train/eval harness
 # ---------------------------------------------------------------------------
@@ -250,6 +295,7 @@ def run_experiment(
     trainer: Optional[Trainer] = None,
     task_type_mapping: Optional[Dict[str, str]] = None,
     training_config: Optional[TrainingConfig] = None,
+    class_weights: Optional[List[Dict[int, float]]] = None,
 ) -> Dict[str, Any]:
     # Resolve the TrainingConfig before building the model so we can pass
     # dropout_rate into MultiTaskModel — the model is constructed before the
@@ -281,6 +327,7 @@ def run_experiment(
         train_ds,
         val_ds,
         num_tasks=len(config.task_names),
+        class_weights=class_weights,
         task_type_mapping=task_type_mapping,
         steps_per_epoch=len(train_ds),
         validation_steps=len(val_ds),
@@ -715,6 +762,11 @@ def run_paper_replication(args: argparse.Namespace) -> None:
         "WA_bi": "wa_bi",
         **{task_name: "discourse" for task_name in discourse_task_names},
     }
+    class_weights = compute_full_train_binary_class_weights(
+        data_dir=args.data_dir,
+        task_names=all_task_names,
+        label_column_map=PROPAGANDA_BINARY_LABEL_MAP,
+    )
     
     config = ModelConfig(
         task_structure=[
@@ -745,6 +797,7 @@ def run_paper_replication(args: argparse.Namespace) -> None:
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         task_type_mapping=task_type_mapping,
+        class_weights=class_weights,
         optimize_thresholds=not args.no_optimize_thresh,
         verbose=args.verbose,
         show_structure=args.show_structure,
