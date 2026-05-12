@@ -909,6 +909,27 @@ class Trainer:
             class_weights_list.append(class_weights)
         
         return class_weights_list
+
+    def _print_class_weights(self, class_weights: List[Dict[int, float]]) -> None:
+        """Print class weights aligned with model task names."""
+        task_names = self.model.task_names or [
+            f"task_{i}" for i in range(self.model.config.total_outputs)
+        ]
+        if not class_weights:
+            print("Class weights: none")
+            return
+
+        task_label_width = max(len(name) for name in task_names) if task_names else 1
+        print("Class weights (per task, inverse class frequency):")
+        for i, task_class_weights in enumerate(class_weights):
+            task_name = task_names[i] if i < len(task_names) else f"task_{i}"
+            formatted_weights = ", ".join(
+                f"class_{int(class_idx)}={float(weight):.6g}"
+                for class_idx, weight in sorted(
+                    task_class_weights.items(), key=lambda item: int(item[0])
+                )
+            )
+            print(f"  {task_name:<{task_label_width}}  {formatted_weights}")
     
     def fit(
         self,
@@ -997,6 +1018,7 @@ class Trainer:
                     print("Computing class weights from training data...")
                     class_weights = self._compute_class_weights(train_dataset)
                     print(f"Computed class weights for {len(class_weights)} tasks")
+                self._print_class_weights(class_weights)
                 
                 if task_weights is None:
                     print("Computing task weights from training data...")
@@ -1012,6 +1034,10 @@ class Trainer:
                     print("Regression target standardization:")
                     for name, s in regression_stats.items():
                         print(f"  {name}: mean={s['mean']:.4f}, std={s['std']:.4f}")
+                self.model._class_weights = [
+                    {int(class_idx): float(weight) for class_idx, weight in weights.items()}
+                    for weights in class_weights
+                ]
                 self.model._regression_stats = regression_stats
                 
                 loss_fn = self._build_loss_function(
