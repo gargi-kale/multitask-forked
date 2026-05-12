@@ -960,7 +960,8 @@ class Trainer:
         
         Weights are automatically computed from training data if not provided:
         - Task weights: inversely proportional to non-masked sample count per task
-        - Class weights: inversely proportional to class frequency within each task
+        - Class weights: inversely proportional to class frequency within each task,
+          estimated from a sampled scan of up to 10,000 training examples
         
         Args:
             train_dataset: Training TensorFlow Dataset yielding (inputs, labels_dict)
@@ -970,7 +971,9 @@ class Trainer:
             validation_steps: Number of validation steps (auto-calculated if None)
             class_weights: Optional per-task class weights for loss function.
                           If None, automatically computed from training data using
-                          inverse class frequency weighting.
+                          inverse class frequency weighting from a sampled scan
+                          of up to 10,000 training examples. Pass explicit
+                          class_weights to use full-dataset counts.
             task_weights: Optional task-type importance weights for relative prioritization.
                          If None, automatically computed from training data using
                          inverse sample count weighting.

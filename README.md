@@ -270,7 +270,11 @@ history, thresholds = trainer.fit(train_dataset, val_dataset, num_tasks=N)
 
 By default, trainer automatically computes:
 - **Task weights**: Inversely proportional to non-masked samples per task
-- **Class weights**: Inversely proportional to class frequency
+- **Class weights**: Inversely proportional to class frequency, estimated from
+  a sampled pass over up to 10,000 training examples
+
+If you want full-dataset class frequencies (recommended for heavily masked or
+imbalanced tasks), pass explicit `class_weights` to `trainer.fit(...)`:
 
 Override with explicit weights:
 
