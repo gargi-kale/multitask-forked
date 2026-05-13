@@ -95,10 +95,36 @@ class Trainer:
                                  "Each observation must have either all labels present or all labels missing and masked.\n"
                                  "Instead, consider splitting the task into separate binary tasks.")
     
+    def _resolve_task_type_mapping(
+        self,
+        task_type_mapping: Optional[Dict[str, str]] = None,
+        ) -> Dict[str, str]:
+        """Resolve task->task-type mapping with backward-compatible defaults.
+        
+        If no mapping is provided, each task is its own task-type (legacy behavior).
+        This means a single-task or unstructured multi-task setup degenerates
+        naturally to per-task weighting, identical to the original implementation.
+        """
+        task_names = self.model.task_names or [
+            f'task_{i}' for i in range(self.model.config.total_outputs)
+        ]
+        if task_type_mapping is None:
+            return {task_name: task_name for task_name in task_names}
+        
+        resolved = {task_name: task_name for task_name in task_names}
+        for task_name, task_type in task_type_mapping.items():
+            if task_name not in resolved:
+                raise ValueError(
+                    f"task_type_mapping contains unknown task '{task_name}'. "
+                    f"Known tasks: {task_names}"
+                )
+            resolved[task_name] = str(task_type)
+        return resolved
+    
     def _compute_regression_stats(
         self,
         dataset: tf.data.Dataset,
-        num_samples_to_check: int = 10000
+        num_samples_to_check: Optional[int] = None
     ) -> Dict[str, Dict[str, float]]:
         """Compute mean and std for regression tasks from training data.
         
@@ -133,7 +159,7 @@ class Trainer:
         task_values = {name: [] for name in regression_tasks}
         total_samples = 0
         
-        for inputs, labels_dict in dataset.take(num_samples_to_check):
+        for inputs, labels_dict in dataset:
             batch_size = tf.shape(list(labels_dict.values())[0])[0].numpy()
             total_samples += batch_size
             
@@ -143,7 +169,7 @@ class Trainer:
                 if len(valid) > 0:
                     task_values[task_name].extend(valid.tolist())
             
-            if total_samples >= num_samples_to_check:
+            if num_samples_to_check is not None and total_samples >= num_samples_to_check:
                 break
         
         # Compute mean and std
@@ -166,6 +192,7 @@ class Trainer:
         num_tasks: int,
         class_weights: List[Dict[int, float]],
         task_weights: List[float],
+        task_type_mapping: Optional[Dict[str, str]] = None,
         mask_value: Optional[float] = None
     ) -> Callable:
         """Build multi-task loss function with task-specific losses.
@@ -203,7 +230,22 @@ class Trainer:
         """
         if mask_value is None:
             mask_value = self.mask_value
-            
+    
+        # NEW: resolve task-type structure for 1/|T_k| within-type factor
+        task_names = self.model.task_names or [f'task_{i}' for i in range(num_tasks)]
+        resolved_task_type_mapping = self._resolve_task_type_mapping(task_type_mapping)
+        task_type_to_tasks: Dict[str, List[str]] = {}
+        for task_name in task_names:
+            task_type = resolved_task_type_mapping[task_name]
+            task_type_to_tasks.setdefault(task_type, []).append(task_name)
+        
+        # Per-task 1/|T_k| factor, indexed by task index
+        within_type_factors = []
+        for task_name in task_names:
+            task_type = resolved_task_type_mapping[task_name]
+            within_type_factors.append(1.0 / max(len(task_type_to_tasks[task_type]), 1))
+        within_type_factors_tf = tf.cast(within_type_factors, tf.float32)
+        
         task_weights_tf = tf.cast(task_weights, tf.float32)
         
         def dict_weighted_masked_loss(y_true_dict: Any, y_pred_dict: Any):
@@ -335,8 +377,7 @@ class Trainer:
                 else:
                     raise ValueError(f"Unknown task_type: {task_type}")
                 
-                # final aggregation and normalization
-                weighted_loss = loss_val * mask * task_weights_tf[real_idx]
+                weighted_loss = (loss_val * mask * task_weights_tf[real_idx] * within_type_factors_tf[real_idx])
                 total_loss += tf.reduce_sum(weighted_loss)
                 num_valid_samples += tf.reduce_sum(mask)
             
@@ -423,10 +464,14 @@ class Trainer:
         
         optimizer_kwargs = getattr(self.config, 'optimizer_kwargs', {}) or {}
         
+        merged_kwargs = dict(optimizer_kwargs)
+        if opt_type == 'adamw' and 'weight_decay' not in merged_kwargs:
+            merged_kwargs['weight_decay'] = self.config.weight_decay_rate
+
         if opt_type in optimizer_map:
             optimizer = optimizer_map[opt_type](
                 learning_rate=lr_schedule,
-                **optimizer_kwargs
+                **merged_kwargs
             )
         else:
             # get optimizer from keras registry for additional optimizers
@@ -596,7 +641,10 @@ class Trainer:
                     
                 fpr, tpr, thresh = roc_curve(y_task_true_valid, y_task_pred_valid)
                 optimal_threshold = thresh[np.argmax(tpr - fpr)]
-                
+
+                if not np.isfinite(optimal_threshold):
+                    optimal_threshold = float(np.clip(np.nanmax(y_task_pred_valid), 0.0, 1.0))
+
                 y_pred_binary = (y_task_pred_valid > optimal_threshold).astype(int)
                 thresholds[name] = float(optimal_threshold)
                 f1_scores[name] = float(f1_score(y_task_true_valid, y_pred_binary, average='weighted', zero_division=0))
@@ -626,9 +674,12 @@ class Trainer:
                         
                     fpr, tpr, thresh = roc_curve(y_col_true_valid, y_col_pred_valid)
                     opt_thresh = thresh[np.argmax(tpr - fpr)]
-                    
+
+                    if not np.isfinite(opt_thresh):
+                        opt_thresh = float(np.clip(np.nanmax(y_col_pred_valid), 0.0, 1.0))
+
                     y_col_binary = (y_col_pred_valid > opt_thresh).astype(int)
-                    f1 = f1_score(y_col_true_valid, y_col_binary, average='binary', zero_division=0)
+                    f1 = f1_score(y_col_true_valid, y_col_binary, average='weighted', zero_division=0)
                     
                     label_thresholds.append(float(opt_thresh))
                     label_f1s.append(float(f1))
@@ -642,56 +693,104 @@ class Trainer:
     def _compute_task_weights(
         self,
         dataset: tf.data.Dataset,
-        num_samples_to_check: int = 10000
+        task_type_mapping: Optional[Dict[str, str]] = None,
+        num_samples_to_check: Optional[int] = None
     ) -> List[float]:
-        """Compute task weights inversely proportional to non-masked sample count.
+        """Compute task weights from task-type sample counts (paper formulation).
         
-        Implements: ν_k ~ 1/|D_k| where D_k is the set of non-masked samples for task k.
+        Implements ν_k ~ 1/|D_k| where D_k counts datapoints for which at least
+        one task in task-type k has a non-masked label. All tasks within the
+        same task-type share the same ν_k.
+        
+        If no task_type_mapping is provided, each task is its own task-type
+        (legacy per-task weighting behavior).
         
         Args:
             dataset: Training dataset to compute weights from
-            num_samples_to_check: Max number of samples to scan
+            task_type_mapping: Optional mapping from task name to task-type id.
+                            If omitted, each task is its own task-type.
+            num_samples_to_check: Max number of samples to scan (None for full scan)
             
         Returns:
-            List of task weights (one per task)
+            List of per-task weights aligned with model.task_names order.
+            Tasks in the same task-type share the same weight value.
         """
-        task_names = self.model.task_names or [f'task_{i}' for i in range(self.model.config.total_outputs)]
-        task_sample_counts = {name: 0 for name in task_names}
+        task_names = self.model.task_names or [
+            f'task_{i}' for i in range(self.model.config.total_outputs)
+        ]
+        resolved_task_type_mapping = self._resolve_task_type_mapping(task_type_mapping)
+        
+        # Group tasks by task-type
+        task_type_to_tasks: Dict[str, List[str]] = {}
+        for task_name in task_names:
+            task_type = resolved_task_type_mapping[task_name]
+            task_type_to_tasks.setdefault(task_type, []).append(task_name)
+        
+        task_type_sample_counts = {task_type: 0 for task_type in task_type_to_tasks}
         total_samples = 0
         
-        # Count non-masked samples per task
-        for inputs, labels_dict in dataset.take(num_samples_to_check):
+        # Count datapoints per task-type where any task in that type is non-masked
+        for inputs, labels_dict in dataset:
             batch_size = tf.shape(list(labels_dict.values())[0])[0].numpy()
             total_samples += batch_size
             
+            # Per-task validity (NaN-safe): treat non-finite as masked
+            valid_per_task: Dict[str, tf.Tensor] = {}
             for task_name in task_names:
-                labels = labels_dict[task_name]
-                # Count non-masked samples (not equal to self.mask_value)
-                mask_val = tf.cast(self.mask_value, labels.dtype)
-                non_masked = tf.reduce_sum(
-                    tf.cast(tf.not_equal(labels, mask_val), tf.int32)
-                ).numpy()
-                task_sample_counts[task_name] += non_masked
+                labels = tf.cast(labels_dict[task_name], tf.float32)
+                mask_val = tf.cast(self.mask_value, tf.float32)
+                labels_clean = tf.where(tf.math.is_finite(labels), labels, mask_val)
+                valid_entries = tf.not_equal(labels_clean, mask_val)
+                if len(labels.shape) <= 1:
+                    valid_per_task[task_name] = valid_entries
+                else:
+                    reduce_axes = list(range(1, len(labels.shape)))
+                    valid_per_task[task_name] = tf.reduce_any(valid_entries, axis=reduce_axes)
             
-            if total_samples >= num_samples_to_check:
+            # OR-reduce across tasks within each type to get per-type row validity
+            for task_type, grouped_tasks in task_type_to_tasks.items():
+                valid_for_type = valid_per_task[grouped_tasks[0]]
+                for task_name in grouped_tasks[1:]:
+                    valid_for_type = tf.logical_or(valid_for_type, valid_per_task[task_name])
+                task_type_sample_counts[task_type] += int(
+                    tf.reduce_sum(tf.cast(valid_for_type, tf.int32)).numpy()
+                )
+            
+            if num_samples_to_check is not None and total_samples >= num_samples_to_check:
                 break
         
-        # Compute weights as inverse of sample counts, normalized
-        task_weights = []
-        for task_name in sorted(task_names):
-            count = max(task_sample_counts[task_name], 1)  # Avoid division by zero
-            task_weights.append(1.0 / count)
+        # Compute ν_k as inverse of task-type sample counts, normalized over task-types
+        task_type_weights = {
+            task_type: 1.0 / max(count, 1)
+            for task_type, count in task_type_sample_counts.items()
+        }
+        total_weight = sum(task_type_weights.values())
+        if total_weight > 0:
+            scale = len(task_type_weights) / total_weight
+            task_type_weights = {
+                task_type: weight * scale
+                for task_type, weight in task_type_weights.items()
+            }
         
-        # Normalize so weights sum to number of tasks (maintains scale)
-        total_weight = sum(task_weights)
-        task_weights = [w * len(task_weights) / total_weight for w in task_weights]
+        # Diagnostic print
+        print("Task-type non-masked row counts (|D_k|):")
+        for task_type, count in task_type_sample_counts.items():
+            n_tasks_in_type = len(task_type_to_tasks[task_type])
+            print(f"  {task_type} ({n_tasks_in_type} tasks): |D_k|={count}, "
+                f"nu_k={task_type_weights[task_type]:.6f}")
+        
+        # Return list aligned with model task order; tasks in same type share ν_k
+        task_weights = [
+            float(task_type_weights[resolved_task_type_mapping[task_name]])
+            for task_name in task_names
+        ]
         
         return task_weights
     
     def _compute_class_weights(
         self,
         dataset: tf.data.Dataset,
-        num_samples_to_check: int = 10000
+        num_samples_to_check: Optional[int] = None
     ) -> List[Dict[int, float]]:
         """Compute per-task class weights inversely proportional to class frequency.
         
@@ -699,40 +798,40 @@ class Trainer:
         
         Args:
             dataset: Training dataset to compute weights from
-            num_samples_to_check: Max number of samples to scan
+            num_samples_to_check: Max number of samples to scan (None for full scan)
             
         Returns:
             List of dicts mapping class index to weight (one dict per task)
         """
-        task_names = self.model.task_names or [f'task_{i}' for i in range(self.model.config.total_outputs)]
+        task_names = self.model.task_names or [
+            f'task_{i}' for i in range(self.model.config.total_outputs)
+        ]
         
         # Collect labels for each task
         task_labels = {name: [] for name in task_names}
         total_samples = 0
         
-        for inputs, labels_dict in dataset.take(num_samples_to_check):
+        for inputs, labels_dict in dataset:
             batch_size = tf.shape(list(labels_dict.values())[0])[0].numpy()
             total_samples += batch_size
             
-            for task_name in sorted(task_names):
+            for task_name in task_names:
                 labels = labels_dict[task_name].numpy()
-                real_idx = list(self.model.task_names).index(task_name)
-                task_type = self.model.config.get_task_type(real_idx)
                 
-                # Flatten and filter out masked values
+                # Flatten and filter out masked values (NaN-safe)
                 if len(labels.shape) > 1:
                     labels = labels.flatten()
-                valid_labels = labels[labels != self.mask_value]
+                valid_labels = labels[np.isfinite(labels) & (labels != self.mask_value)]
                 
                 if len(valid_labels) > 0:
                     task_labels[task_name].extend(valid_labels.tolist())
             
-            if total_samples >= num_samples_to_check:
+            if num_samples_to_check is not None and total_samples >= num_samples_to_check:
                 break
         
         # Compute class weights for each task
         class_weights_list = []
-        for task_name in sorted(task_names):
+        for task_name in task_names:
             labels = np.array(task_labels[task_name])
             real_idx = list(self.model.task_names).index(task_name)
             task_type = self.model.config.get_task_type(real_idx)
@@ -744,12 +843,17 @@ class Trainer:
                 continue
             
             if len(labels) == 0:
-                # No valid labels - use uniform weights
+                print(f"  No valid labels found for task '{task_name}'. Using uniform class weights.")
                 if task_type == 'binary':
                     class_weights_list.append({0: 1.0, 1: 1.0})
                 else:
                     class_weights_list.append({i: 1.0 for i in range(num_classes)})
                 continue
+            
+            # Diagnostic: show what's actually in the labels after masking
+            unique_vals, unique_counts = np.unique(labels, return_counts=True)
+            print(f"  [debug] {task_name}: n_after_mask={len(labels)}, "
+                f"unique={dict(zip(unique_vals.tolist(), unique_counts.tolist()))}")
             
             # Count class frequencies
             if task_type == 'binary':
@@ -759,7 +863,6 @@ class Trainer:
             elif task_type == 'multiclass':
                 class_counts = np.bincount(labels.astype(int), minlength=num_classes)
             elif task_type == 'multilabel':
-                # For multilabel, treat each class independently (binary per class)
                 class_counts = np.bincount(labels.astype(int), minlength=2)
                 if len(class_counts) < 2:
                     class_counts = np.array([class_counts[0] if len(class_counts) > 0 else 0, 0])
@@ -772,8 +875,11 @@ class Trainer:
                     # Class not present - use very small weight to avoid division by zero
                     class_weights[class_idx] = 0.001
                 else:
-                    # Inverse frequency
                     class_weights[class_idx] = len(labels) / (len(class_counts) * count)
+            
+            # Print final weights per task (Isaac's request)
+            print(f"  Class weights for {task_name}: "
+                f"{ {k: round(v, 4) for k, v in class_weights.items()} }")
             
             class_weights_list.append(class_weights)
         
@@ -788,6 +894,7 @@ class Trainer:
         validation_steps: Optional[int] = None,
         class_weights: Optional[List[Dict[int, float]]] = None,
         task_weights: Optional[List[float]] = None,
+        task_type_mapping: Optional[Dict[str, str]] = None,
         callbacks: Optional[List[tf.keras.callbacks.Callback]] = None,
         optimize_thresholds: bool = False,
         checkpoint_dir: Optional[str] = None,
@@ -821,6 +928,8 @@ class Trainer:
             task_weights: Optional task importance weights for relative task prioritization.
                          If None, automatically computed from training data using
                          inverse sample count weighting.
+            task_type_mapping: Optional mapping from task name to task-type id for task weighting.
+                               If omitted, each task is treated as its own type.
             callbacks: Additional Keras callbacks
             optimize_thresholds: Whether to find optimal classification thresholds
                                 on validation data (only for binary/multilabel tasks).
@@ -866,13 +975,11 @@ class Trainer:
                 
                 if task_weights is None:
                     print("Computing task weights from training data...")
-                    task_weights = self._compute_task_weights(train_dataset)
-                    print(f"Task weights: {[f'{w:.3f}' for w in task_weights]}")
-                    
-                if task_weights is None:
-                    print("Computing task weights from training data...")
-                    task_weights = self._compute_task_weights(train_dataset)
-                    print(f"Task weights: {[f'{w:.3f}' for w in task_weights]}")
+                    task_weights = self._compute_task_weights(train_dataset,
+                                                              task_type_mapping=task_type_mapping,)
+                    named = dict(zip(self.model.task_names,
+                                     [round(w, 6) for w in task_weights]))
+                    print(f"Task weights (in task_names order): {named}")
                 
                 # Compute regression standardization stats from training data
                 regression_stats = self._compute_regression_stats(train_dataset)
@@ -885,7 +992,8 @@ class Trainer:
                 loss_fn = self._build_loss_function(
                     num_tasks=num_tasks,
                     class_weights=class_weights,
-                    task_weights=task_weights
+                    task_weights=task_weights,
+                    task_type_mapping=task_type_mapping,
                 )
             
             # Determine steps per epoch
@@ -1262,7 +1370,10 @@ class Trainer:
             # Compute binary metrics if thresholds available
             if use_thresholds is not None and task_type not in ('multiclass', 'regression'):
                 y_out_pred_binary = y_pred_binary_dict[name][valid_mask]
-                avg_method = 'binary' if task_type == 'binary' else 'weighted'
+                # Use weighted averaging consistently for binary and multilabel.
+                # Matches _find_optimal_thresholds and the paper's reported metric,
+                # eliminating the fit-time vs eval-time F1 gap.
+                avg_method = 'weighted'
                 
                 if 'accuracy' in metrics:
                     acc = accuracy_score(y_out_true_binary, y_out_pred_binary)
