@@ -23,6 +23,8 @@ Experiments:
                         Propaganda technique columns as 18 separate binary heads
     discourse_dims      Discourse dimensions only (regression)
     discourse_binary    Binary discourse dimensions
+    discourse_binary_single_task
+                        Each binary discourse dimension trained as its own model
     propaganda_binary   Propaganda techniques + binary discourse dimensions
     all_task_types      All task types combined
     all_task_types_binary_prop
@@ -57,6 +59,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from dataclasses import replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -459,6 +462,81 @@ def run_discourse_binary(args: argparse.Namespace) -> None:
     )
 
 
+IAC_SINGLE_TASK_TRAINING_CONFIG = TrainingConfig(
+    optimizer_type="adamw",
+    learning_rate=3e-4,
+    weight_decay_rate=0.01,
+    warmup_percent=5,
+    batch_size=128,
+    dropout_rate=0.2,
+)
+
+
+def run_discourse_binary_single_task(args: argparse.Namespace) -> None:
+    """Train each IAC binary dimension in an isolated single-task model."""
+    print("\n=== Experiment: discourse_binary_single_task ===")
+    training_config = replace(
+        IAC_SINGLE_TASK_TRAINING_CONFIG,
+        epochs=args.epochs,
+    )
+    print(
+        "Training config: "
+        f"optimizer={training_config.optimizer_type} "
+        f"lr={training_config.learning_rate} "
+        f"wd={training_config.weight_decay_rate} "
+        f"warmup={training_config.warmup_percent}% "
+        f"batch={training_config.batch_size} "
+        f"dropout={training_config.dropout_rate} "
+        f"epochs={training_config.epochs}"
+    )
+
+    encoder_config = ENCODER_CONFIGS[args.encoder]
+    summary: List[Dict[str, Any]] = []
+
+    for col in DISCOURSE_BINARY_COLUMNS:
+        print("\n" + "=" * 80)
+        print(f"Single-task model: {col}")
+        print("=" * 80)
+
+        train_ds, val_ds, _ = load_splits(
+            [col],
+            encoder_config=encoder_config,
+            batch_size=training_config.batch_size,
+            data_dir=args.data_dir,
+        )
+        config = ModelConfig(
+            task_structure=[[1]],
+            task_names=[col],
+            task_types=["binary"],
+            num_classes_per_task=[2],
+            encoder_config=encoder_config,
+        )
+        results = run_experiment(
+            config,
+            train_ds,
+            val_ds,
+            optimize_thresholds=not args.no_optimize_thresh,
+            verbose=args.verbose,
+            show_structure=args.show_structure,
+            training_config=training_config,
+        )
+
+        task_metrics = (results.get("task_metrics", {}) or {}).get(col, {})
+        overall = results.get("overall_metrics", {}) or {}
+        metrics = task_metrics or overall
+        summary.append({"task": col, **metrics})
+
+    print("\n=== discourse_binary_single_task summary ===")
+    for row in summary:
+        print(
+            f"{row['task']}: "
+            f"f1={row.get('f1', 'NA')} "
+            f"ap={row.get('average_precision', 'NA')} "
+            f"auc={row.get('auc', 'NA')} "
+            f"acc={row.get('accuracy', 'NA')}"
+        )
+
+
 def run_propaganda_binary(args: argparse.Namespace) -> None:
     print("\n=== Experiment: propaganda_binary ===")
     binary_cols = list(DISCOURSE_BINARY_COLUMNS)
@@ -810,6 +888,7 @@ EXPERIMENTS = {
     "propaganda_cols_binary": run_propaganda_cols_binary,
     "discourse_dims": run_discourse_dims,
     "discourse_binary": run_discourse_binary,
+    "discourse_binary_single_task": run_discourse_binary_single_task,
     "propaganda_binary": run_propaganda_binary,
     "all_task_types": run_all_task_types,
     "all_task_types_binary_prop": run_all_task_types_binary_prop,
