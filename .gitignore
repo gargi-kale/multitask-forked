@@ -180,3 +180,8 @@ tests_model/
 
 # Caches
 .embedding_cache
+
+# Notes
+notes/
+
+.venv-mrjob

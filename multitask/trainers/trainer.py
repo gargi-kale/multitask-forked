@@ -209,9 +209,9 @@ class Trainer:
         Masking: Labels with value mask_value (-1 by default) are excluded from
         both loss computation and normalization, enabling handling of missing labels.
         
-        Task weighting: Each task can have importance weight applied to its loss,
-        allowing prioritization of certain tasks during training. Weights are
-        automatically computed based on task sample sizes (inversely proportional).
+        Task-type weighting: Tasks can be grouped into task-types. The total loss
+        is a weighted sum across task-types with ν_k proportional to inverse
+        task-type dataset size, and includes a within-type factor 1/|T_k|.
         
         Class weighting: Each class within a task can have importance weight applied,
         handling class imbalance. Weights are automatically computed based on class
@@ -221,8 +221,10 @@ class Trainer:
             num_tasks: Total number of output tasks
             class_weights: Per-task class weights, list of {0: weight, 1: weight} dicts
                           (automatically computed in fit() if not provided by user)
-            task_weights: Relative importance weights for each task
+            task_weights: Relative importance weights for each task-type
                          (automatically computed in fit() if not provided by user)
+            task_type_mapping: Optional mapping from task name to task-type id.
+                              If omitted, each task is treated as its own task-type.
             mask_value: Value indicating missing labels to be excluded (default: -1)
             
         Returns:
@@ -254,10 +256,11 @@ class Trainer:
             For each task:
             1. Compute task-specific loss based on task type (binary/multiclass/multilabel)
             2. Apply mask to exclude invalid labels
-            3. Apply task weight to prioritize certain tasks
+            3. Apply task-type weight ν_k and within-type factor 1/|T_k|
             4. Accumulate into total loss
             
-            Final loss is averaged over all valid (non-masked) samples.
+            Final loss is the weighted sum over task-types (paper-style formulation),
+            not a global mean over valid entries.
             
             Note: During graph construction, Keras may pass SymbolicTensor objects
             instead of dicts. This function handles both cases.
@@ -884,6 +887,27 @@ class Trainer:
             class_weights_list.append(class_weights)
         
         return class_weights_list
+
+    def _print_class_weights(self, class_weights: List[Dict[int, float]]) -> None:
+        """Print class weights aligned with model task names."""
+        task_names = self.model.task_names or [
+            f"task_{i}" for i in range(self.model.config.total_outputs)
+        ]
+        if not class_weights:
+            print("Class weights: none")
+            return
+
+        task_label_width = max(len(name) for name in task_names) if task_names else 1
+        print("Class weights (per task, inverse class frequency):")
+        for i, task_class_weights in enumerate(class_weights):
+            task_name = task_names[i] if i < len(task_names) else f"task_{i}"
+            formatted_weights = ", ".join(
+                f"class_{int(class_idx)}={float(weight):.6g}"
+                for class_idx, weight in sorted(
+                    task_class_weights.items(), key=lambda item: int(item[0])
+                )
+            )
+            print(f"  {task_name:<{task_label_width}}  {formatted_weights}")
     
     def fit(
         self,
@@ -972,6 +996,7 @@ class Trainer:
                     print("Computing class weights from training data...")
                     class_weights = self._compute_class_weights(train_dataset)
                     print(f"Computed class weights for {len(class_weights)} tasks")
+                self._print_class_weights(class_weights)
                 
                 if task_weights is None:
                     print("Computing task weights from training data...")
@@ -987,6 +1012,10 @@ class Trainer:
                     print("Regression target standardization:")
                     for name, s in regression_stats.items():
                         print(f"  {name}: mean={s['mean']:.4f}, std={s['std']:.4f}")
+                self.model._class_weights = [
+                    {int(class_idx): float(weight) for class_idx, weight in weights.items()}
+                    for weights in class_weights
+                ]
                 self.model._regression_stats = regression_stats
                 
                 loss_fn = self._build_loss_function(
@@ -1625,11 +1654,16 @@ class Trainer:
             >>> # Continue training with restored optimizer state
             >>> history, new_thresholds = trainer.fit(train_ds, val_ds, num_tasks=10)
         """
-        from ..models.persistence import load_model
-        
+        from ..models.persistence import load_model, _get_build_dummy_input
+
         # Load model (includes weights, config, encoder, AND thresholds if saved)
         model, thresholds = load_model(filepath, encoder=encoder)
-        
+
+        # Reload metadata so we can build encoder-appropriate dummy inputs below.
+        # load_model already validated this file exists.
+        with open(os.path.join(filepath, 'metadata.json'), 'r') as f:
+            metadata = json.load(f)
+
         # Load training config if available
         training_config_path = os.path.join(filepath, 'training_config.json')
         if os.path.exists(training_config_path):
@@ -1667,24 +1701,12 @@ class Trainer:
                     import pickle
                     with open(optimizer_weights_path, 'rb') as f:
                         optimizer_weights = pickle.load(f)
-                    
+
                     # Need to call the model once to initialize optimizer variables
-                    # This is a TensorFlow requirement before setting optimizer weights
-                    dummy_input = tf.zeros((1, 128))  # Placeholder
-                    if model.uses_encoder:
-                        if model.encoder_type == 'huggingface':
-                            dummy_input = {
-                                'input_ids': tf.zeros((1, 128), dtype=tf.int32),
-                                'attention_mask': tf.ones((1, 128), dtype=tf.int32),
-                                'token_type_ids': tf.zeros((1, 128), dtype=tf.int32),
-                            }
-                        else:
-                            dummy_input = {
-                                'input_word_ids': tf.zeros((1, 128), dtype=tf.int32),
-                                'input_mask': tf.ones((1, 128), dtype=tf.int32),
-                                'input_type_ids': tf.zeros((1, 128), dtype=tf.int32),
-                            }
-                    
+                    # before set_weights. Reuse the same dummy-input helper used
+                    # at load time so the input shape matches the encoder.
+                    dummy_input = _get_build_dummy_input(model, metadata)
+
                     with tf.GradientTape() as tape:
                         _ = model(dummy_input, training=True)
                     

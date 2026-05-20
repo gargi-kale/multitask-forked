@@ -11,6 +11,8 @@ This class handles encoder configurations and has the following attributes
 - encoder_integration: how we access the encoder
 - trainable_encoder
 - embedding_dim
+- api_key: optional override for API encoders; falls back to the per-provider environment variable (`OPENAI_API_KEY`, etc.). Not persisted to disk.
+- from_pt: when loading a HuggingFace model, convert PyTorch weights on the fly. Set to `True` if the model only ships PyTorch checkpoints (the loader raises an informative error pointing here). Persisted by save/load.
 
 ## Supported Encoders
 
