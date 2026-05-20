@@ -18,9 +18,6 @@ global-exclude *.dylib
 recursive-exclude tests *
 recursive-exclude docs *
 recursive-exclude examples *
-recursive-exclude legacy *
-recursive-exclude multitask/local_test_runs *
-recursive-exclude multitask/cluster_runs *
 exclude environment.yml
 exclude requirements.txt
 prune .git
