@@ -785,14 +785,7 @@ class MultiTaskModel(tf.keras.Model):
         # Use the model's task_names order so flatten/unflatten roundtrip
         # exactly. Sorted alphabetical order would scramble columns relative
         # to unflatten_outputs, which iterates self.task_names.
-        if self.task_names is not None:
-            ordered = [n for n in self.task_names if n in output_dict]
-            # Append any pool outputs (or extras) in stable alphabetical order
-            extras = sorted(k for k in output_dict.keys() if k not in ordered)
-            task_names = ordered + extras
-        else:
-            task_names = sorted(output_dict.keys())
-
+        task_names = self.task_names or [f'task_{i}' for i in range(self.config.total_outputs)]
         tensors = [output_dict[name] for name in task_names]
         concatenated = tf.concat(tensors, axis=1)
 
@@ -831,23 +824,20 @@ class MultiTaskModel(tf.keras.Model):
             >>> # output_dict['task_2'] has shape [batch_size, 5]
             >>> # output_dict['propaganda'] has shape [batch_size, 1]  (if pooled)
         """
-        if self.task_names is None:
-            task_names = [f'task_{i}' for i in range(self.config.total_outputs)]
-        else:
-            task_names = self.task_names
-        
+        task_names = self.task_names or [f'task_{i}' for i in range(self.config.total_outputs)]
+
         # First, unflatten the architectural task outputs
         output_dict = {}
         start = 0
-        for task_name in task_names:
-            output_dim = self.config.get_output_dim_for_task(task_names.index(task_name))
+        for task_idx, task_name in enumerate(task_names):
+            output_dim = self.config.get_output_dim_for_task(task_idx)
             output_dict[task_name] = concatenated_tensor[:, start:start+output_dim]
             start += output_dim
-        
+
         # Then derive pooled outputs from the unflattened task outputs
         pooled_outputs = self._compute_pooled_outputs(output_dict)
         output_dict.update(pooled_outputs)
-        
+
         return output_dict
     
     def validate_dataset(
@@ -972,11 +962,13 @@ class MultiTaskModel(tf.keras.Model):
                         f"Got: {sorted(actual_task_names)}"
                     )
                 
-                # Validate each task's labels
-                # Iterate in original task_names order and look up config by the
-                # real index — alphabetical position is not the same as config position.
-                task_names_iter = self.task_names or sorted(labels_dict.keys())
-                for task_name in task_names_iter:
+                # Validate each task's labels.
+                # Iterate in the model's task order so task_idx aligns with
+                # config.task_types / config.num_classes_per_task. Sorting the
+                # dict keys here would misalign the index lookup whenever
+                # task_names aren't already alphabetical.
+                model_task_names = self.task_names or [f'task_{i}' for i in range(self.config.total_outputs)]
+                for task_idx, task_name in enumerate(model_task_names):
                     labels = labels_dict[task_name]
                     real_idx = (self.task_names.index(task_name)
                                 if self.task_names else
