@@ -32,7 +32,7 @@ A flexible multi-task learning library for NLP supporting mixed task types (bina
 ### From PyPI
 
 ```bash
-pip install multitask
+pip install multitask-py
 ```
 
 This installs the core library and its dependencies:
@@ -46,7 +46,7 @@ This installs the core library and its dependencies:
 To install with all optional backends and features:
 
 ```bash
-pip install 'multitask[huggingface,openai,cohere,voyageai,regression]'
+pip install 'multitask-py[huggingface,openai,cohere,voyageai,regression]'
 ```
 
 Or install extras individually as needed:
@@ -403,9 +403,9 @@ TrainingConfig(
 ```bash
 pip install tensorflow-hub             # ModuleNotFoundError: tensorflow_hub
 pip install transformers               # ModuleNotFoundError: transformers
-pip install 'multitask[huggingface]'   # ...or install the extra (includes transformers + torch)
-pip install 'multitask[openai]'        # ModuleNotFoundError: openai
-pip install 'multitask[regression]'    # ModuleNotFoundError: scipy
+pip install 'multitask-py[huggingface]'   # ...or install the extra (includes transformers + torch)
+pip install 'multitask-py[openai]'        # ModuleNotFoundError: openai
+pip install 'multitask-py[regression]'    # ModuleNotFoundError: scipy
 ```
 
 **GPU issues:**
@@ -444,10 +444,13 @@ setup_gpu_memory_growth()
 ## Citation
 
 ```bibtex
-@software{multitask,
-  title = {multitask: A Flexible Multi-Task Learning Library for NLP},
-  author = {Mehlhaff, Isaac D. and Morucci, Marco},
-  year = {2025},
+@software{multitask_py,
+    title = {multitask-py: A Flexible Multi-Task Learning Library for Natural Language Processing},
+    author = {Mehlhaff, Isaac D. and Morucci, Marco and Ginting, Josephene and Tian, Eddie Ye},
+    year = {2026},
+    version = {1.0.1},
+    url = {https://pypi.org/project/multitask-py/},
+    repository = {https://github.com/imehlhaff/multitask}
 }
 ```
 

@@ -3,15 +3,15 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "multitask"
-version = "1.0.0"
+name = "multitask-py"
+version = "1.0.2"
 description = "A flexible multi-task learning library for natural language processing with support for hierarchical task structures."
 readme = "README.md"
 authors = [
-    {name = "Josephene Ginting", email = "josepheneginting@gmail.com"},
-    {name = "Eddie Ye Tian", email = "eddietian06@gmail.com"},
     {name = "Isaac D. Mehlhaff", email = "isaac.mehlhaff@gmail.com"},
-    {name = "Marco Morucci", email = "moruccim@msu.edu"}
+    {name = "Marco Morucci", email = "moruccim@msu.edu"},
+    {name = "Josephene Ginting", email = "josepheneginting@gmail.com"},
+    {name = "Eddie Ye Tian", email = "eddietian06@gmail.com"}
 ]
 license = "MIT"
 requires-python = ">=3.11,<3.13"
@@ -73,10 +73,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/multitask"
-Documentation = "https://github.com/yourusername/multitask#readme"
-Repository = "https://github.com/yourusername/multitask.git"
-"Bug Tracker" = "https://github.com/yourusername/multitask/issues"
+Homepage = "https://github.com/imehlhaff/multitask"
+Documentation = "https://github.com/imehlhaff/multitask#readme"
+Repository = "https://github.com/imehlhaff/multitask.git"
+"Bug Tracker" = "https://github.com/imehlhaff/multitask/issues"
 
 [tool.setuptools]
 packages = ["multitask", "multitask.models", "multitask.layers", "multitask.trainers", "multitask.utils"]
