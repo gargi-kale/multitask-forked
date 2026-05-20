@@ -79,7 +79,7 @@ Repository = "https://github.com/yourusername/multitask.git"
 "Bug Tracker" = "https://github.com/yourusername/multitask/issues"
 
 [tool.setuptools]
-packages = ["multitask", "multitask.models", "multitask.layers", "multitask.trainers", "multitask.data", "multitask.utils"]
+packages = ["multitask", "multitask.models", "multitask.layers", "multitask.trainers", "multitask.utils"]
 
 [tool.setuptools.package-data]
 multitask = ["py.typed"]
