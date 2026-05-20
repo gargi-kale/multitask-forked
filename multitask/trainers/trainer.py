@@ -209,9 +209,9 @@ class Trainer:
         Masking: Labels with value mask_value (-1 by default) are excluded from
         both loss computation and normalization, enabling handling of missing labels.
         
-        Task weighting: Each task can have importance weight applied to its loss,
-        allowing prioritization of certain tasks during training. Weights are
-        automatically computed based on task sample sizes (inversely proportional).
+        Task-type weighting: Tasks can be grouped into task-types. The total loss
+        is a weighted sum across task-types with ν_k proportional to inverse
+        task-type dataset size, and includes a within-type factor 1/|T_k|.
         
         Class weighting: Each class within a task can have importance weight applied,
         handling class imbalance. Weights are automatically computed based on class
@@ -221,8 +221,10 @@ class Trainer:
             num_tasks: Total number of output tasks
             class_weights: Per-task class weights, list of {0: weight, 1: weight} dicts
                           (automatically computed in fit() if not provided by user)
-            task_weights: Relative importance weights for each task
+            task_weights: Relative importance weights for each task-type
                          (automatically computed in fit() if not provided by user)
+            task_type_mapping: Optional mapping from task name to task-type id.
+                              If omitted, each task is treated as its own task-type.
             mask_value: Value indicating missing labels to be excluded (default: -1)
             
         Returns:
@@ -254,10 +256,11 @@ class Trainer:
             For each task:
             1. Compute task-specific loss based on task type (binary/multiclass/multilabel)
             2. Apply mask to exclude invalid labels
-            3. Apply task weight to prioritize certain tasks
+            3. Apply task-type weight ν_k and within-type factor 1/|T_k|
             4. Accumulate into total loss
             
-            Final loss is averaged over all valid (non-masked) samples.
+            Final loss is the weighted sum over task-types (paper-style formulation),
+            not a global mean over valid entries.
             
             Note: During graph construction, Keras may pass SymbolicTensor objects
             instead of dicts. This function handles both cases.

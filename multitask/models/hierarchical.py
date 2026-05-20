@@ -4,11 +4,9 @@ Multi-task learning model with hierarchical branching.
 This module implements a flexible hierarchical branching architecture for multi-task learning.
 """
 import os
-import copy
 import tensorflow as tf
 from typing import Optional, Union, Dict, List, Any, Tuple
 from multitask.config import ModelConfig, EncoderConfig, EncoderInputType, EncoderIntegration
-# from multitask.legacy.train_test import loss
 
 
 def _get_api_encoder_classes():
@@ -37,7 +35,12 @@ class MultiTaskModel(tf.keras.Model):
         config: ModelConfig object defining the architecture
         embedding_dim: If using embeddings, their dimension
         num_classes_per_task: Number of classes per task (default: 2 for binary)
-        dropout_rate: Dropout rate (overrides config if provided)
+        dropout_rate: Dropout rate. Must be set explicitly to use a value
+            other than the 0.1 fallback (which matches the default of
+            ``TrainingConfig.dropout_rate``). When constructing a model
+            alongside a TrainingConfig, pass
+            ``dropout_rate=training_config.dropout_rate`` so the two stay
+            in sync.
         name: Optional model name
     
     Example:
@@ -57,7 +60,10 @@ class MultiTaskModel(tf.keras.Model):
         name: Optional[str] = None,
         **kwargs
     ):
-        # Use dropout from config if not explicitly provided
+        # 0.1 fallback matches TrainingConfig.dropout_rate's default. To use
+        # a value the user set on TrainingConfig, callers should pass
+        # dropout_rate=training_config.dropout_rate explicitly here — the
+        # model is built before the Trainer, so the trainer can't push it in.
         dropout_rate = dropout_rate if dropout_rate is not None else 0.1
 
         # Consume encoder overrides before passing kwargs to parent (keras.Model rejects unknown kwargs)
@@ -759,23 +765,28 @@ class MultiTaskModel(tf.keras.Model):
         return current_paths 
        
     def flatten_outputs(
-        self, 
+        self,
         output_dict: Dict[str, tf.Tensor]
     ) -> Tuple[tf.Tensor, Dict[str, Tuple[int, int]]]:
         """Convert dictionary outputs to concatenated tensor for external tools.
         
         Useful when integrating with external tools that expect tensor outputs.
-        Provides mapping of where each task's output is located in the concatenated tensor.
-        
+        Concatenates only the architectural task outputs (in the model's
+        ``task_names`` order) — pooled outputs are not included since they
+        are derived from task outputs and would duplicate information.
+        :meth:`unflatten_outputs` reconstructs tasks in the same order and
+        re-derives pools, making the round-trip lossless for task columns.
+
         Args:
-            output_dict: Dictionary output from model.predict() or model()
-            
+            output_dict: Dictionary output from model.predict() or model().
+                         Pool keys, if present, are ignored.
+
         Returns:
             Tuple of:
                 - concatenated_tensor: [batch_size, total_output_dims]
-                - task_indices: Dict mapping each key in ``output_dict`` (task or pool name)
-                  to ``(start_col, end_col)`` in the concatenated tensor
-                
+                - task_indices: Dict mapping each task name to
+                  ``(start_col, end_col)`` in the concatenated tensor
+
         Example:
             >>> predictions = model.predict(data)  # Returns dict
             >>> tensor, indices = model.flatten_outputs(predictions)
@@ -800,16 +811,17 @@ class MultiTaskModel(tf.keras.Model):
         return concatenated, task_indices
     
     def unflatten_outputs(
-        self, 
+        self,
         concatenated_tensor: tf.Tensor
     ) -> Dict[str, tf.Tensor]:
         """Convert concatenated tensor back to dictionary format.
-        
-        Reconstructs **architectural task** columns from left to right in ``task_names`` order,
-        then **recomputes** pooled outputs via ``_compute_pooled_outputs``. It is not a strict
-        inverse of :meth:`flatten_outputs` when ``output_dict`` also contained pool keys:
-        use :meth:`flatten_outputs` only on task keys (or expect pools to be derived again here).
-        
+
+        Reconstructs architectural task columns in the model's ``task_names``
+        order — matching :meth:`flatten_outputs` — then re-derives pooled
+        outputs via ``_compute_pooled_outputs``. The round-trip
+        ``unflatten_outputs(flatten_outputs(d)[0])`` recovers the task entries
+        of ``d`` and re-emits its pool entries.
+
         Args:
             concatenated_tensor: Tensor output shape [batch_size, total_output_dims]
             

@@ -429,7 +429,7 @@ outputs_dict = model.unflatten_outputs(concatenated_tensor)
 # Returns: {'task_0': ..., 'task_1': ..., 'task_2': ...}
 ```
 
-**Pools:** `flatten_outputs` concatenates **all keys** present in the dict (tasks and pool outputs when included). `unflatten_outputs` only slices **architectural task** widths in order, then **recomputes** pools from those tasks. For a true round-trip on tensors, flatten **task outputs only** (exclude pool keys), or accept that pool entries are reconstructed rather than restored from the flat tensor.
+**Ordering and pools:** `flatten_outputs` concatenates only the architectural task outputs in `model.task_names` order; pool keys, if present in the dict, are skipped. `unflatten_outputs` reads the same columns back in the same order, then re-derives pools via `_compute_pooled_outputs`. The round-trip `unflatten_outputs(flatten_outputs(d)[0])` recovers the task entries of `d` and re-emits its pool entries — pool tensors are reconstructed rather than carried through the flat tensor.
 
 ## Preprocessing Examples
 

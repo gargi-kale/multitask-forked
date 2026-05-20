@@ -361,10 +361,17 @@ ModelConfig(
     num_classes_per_task=[2, 5, 4],
     shared_layer_sizes=[256, 128],   # Optional dense stack before branches
     default_layer_sizes=[128, 64],   # Per-branch dense stacks (if not using branch_layer_sizes)
-    dropout_rate=0.1,
     encoder_config=encoder_config,
 )
 ```
+
+`dropout_rate` is not a `ModelConfig` field — pass it to `MultiTaskModel(...)`:
+
+```python
+model = MultiTaskModel(config, dropout_rate=training_config.dropout_rate)
+```
+
+The default falls back to `0.1` (matching `TrainingConfig.dropout_rate`'s default).
 
 ### EncoderConfig
 ```python

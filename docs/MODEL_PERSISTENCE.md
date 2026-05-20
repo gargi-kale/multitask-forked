@@ -173,10 +173,11 @@ Saves model to directory with optional thresholds.
 **Files created**:
 ```
 filepath/
-├── config.json       # ModelConfig
-├── metadata.json     # Encoder info, dropout rate
-├── weights.weights.h5  # Model weights (Keras 3 format)
-└── thresholds.json     # Optimized thresholds (if provided)
+├── config.json             # ModelConfig
+├── metadata.json           # Encoder info, dropout rate
+├── weights.weights.h5      # Model weights (Keras 3 format)
+├── thresholds.json         # Optimized thresholds (if provided)
+└── regression_stats.json   # Mean/std per regression task (if any regression tasks exist)
 ```
 
 ### load_model()
@@ -357,10 +358,11 @@ transformers==4.30.0
 
 ```
 my_model/
-├── config.json           # Task structure, types, classes
-├── metadata.json         # Encoder type/ID, embedding dim
-├── thresholds.json       # Optimized thresholds (if provided)
-└── weights.weights.h5    # Model weights (Keras 3 format)
+├── config.json             # Task structure, types, classes
+├── metadata.json           # Encoder type/ID, embedding dim
+├── thresholds.json         # Optimized thresholds (if provided)
+├── regression_stats.json   # Mean/std per regression task (if any regression tasks)
+└── weights.weights.h5      # Model weights (Keras 3 format)
 ```
 
 ### Checkpoint Save
@@ -370,8 +372,9 @@ my_model/
 ├── config.json
 ├── metadata.json
 ├── thresholds.json
-├── training_config.json  # Learning rate, epochs, etc.
-├── optimizer.pkl         # Optimizer state (if save_optimizer=True)
+├── regression_stats.json   # Mean/std per regression task (if any regression tasks)
+├── training_config.json    # Learning rate, epochs, etc.
+├── optimizer.pkl           # Optimizer state (if save_optimizer=True)
 └── weights.weights.h5
 ```
 
