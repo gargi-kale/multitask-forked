@@ -189,7 +189,21 @@ class EncoderConfig:
             from_pt=d.get("from_pt", False),
         )
 
-    def resolve_identifier(self, encoder_identifier: str) -> tuple[EncoderIntegration, str]:
+    def resolve_identifier(self, encoder_identifier: str) -> None:
+        """Infer encoder integration (and normalize identifier) from a string.
+
+        Mutates ``self.encoder_integration`` and, for prefixed identifiers,
+        ``self.encoder_identifier``. Recognized forms:
+
+        - ``https://tfhub.dev/...`` -> ``EncoderIntegration.TFHUB`` (identifier kept as-is).
+        - ``<prefix>:<model_name>`` where ``<prefix>`` matches an
+          ``EncoderIntegration`` value (e.g. ``openai:text-embedding-3-small``)
+          -> that integration, with identifier stripped to ``<model_name>``.
+        - Anything else -> ``EncoderIntegration.HUGGINGFACE`` (identifier kept).
+
+        Raises:
+            ValueError: If the identifier uses an unrecognized prefix.
+        """
         if encoder_identifier.startswith('https://tfhub.dev/'):
             self.encoder_integration = EncoderIntegration.TFHUB
         
@@ -197,7 +211,7 @@ class EncoderConfig:
             prefix, model_name = encoder_identifier.split(':', 1)
             try:
                 integration = EncoderIntegration(prefix.lower())
-            except:
+            except ValueError:
                 raise ValueError(f"Unrecognized integration: {prefix} from identifier {encoder_identifier}")
             
             self.encoder_integration = integration
