@@ -1651,11 +1651,16 @@ class Trainer:
             >>> # Continue training with restored optimizer state
             >>> history, new_thresholds = trainer.fit(train_ds, val_ds, num_tasks=10)
         """
-        from ..models.persistence import load_model
-        
+        from ..models.persistence import load_model, _get_build_dummy_input
+
         # Load model (includes weights, config, encoder, AND thresholds if saved)
         model, thresholds = load_model(filepath, encoder=encoder)
-        
+
+        # Reload metadata so we can build encoder-appropriate dummy inputs below.
+        # load_model already validated this file exists.
+        with open(os.path.join(filepath, 'metadata.json'), 'r') as f:
+            metadata = json.load(f)
+
         # Load training config if available
         training_config_path = os.path.join(filepath, 'training_config.json')
         if os.path.exists(training_config_path):
@@ -1693,24 +1698,12 @@ class Trainer:
                     import pickle
                     with open(optimizer_weights_path, 'rb') as f:
                         optimizer_weights = pickle.load(f)
-                    
+
                     # Need to call the model once to initialize optimizer variables
-                    # This is a TensorFlow requirement before setting optimizer weights
-                    dummy_input = tf.zeros((1, 128))  # Placeholder
-                    if model.uses_encoder:
-                        if model.encoder_type == 'huggingface':
-                            dummy_input = {
-                                'input_ids': tf.zeros((1, 128), dtype=tf.int32),
-                                'attention_mask': tf.ones((1, 128), dtype=tf.int32),
-                                'token_type_ids': tf.zeros((1, 128), dtype=tf.int32),
-                            }
-                        else:
-                            dummy_input = {
-                                'input_word_ids': tf.zeros((1, 128), dtype=tf.int32),
-                                'input_mask': tf.ones((1, 128), dtype=tf.int32),
-                                'input_type_ids': tf.zeros((1, 128), dtype=tf.int32),
-                            }
-                    
+                    # before set_weights. Reuse the same dummy-input helper used
+                    # at load time so the input shape matches the encoder.
+                    dummy_input = _get_build_dummy_input(model, metadata)
+
                     with tf.GradientTape() as tape:
                         _ = model(dummy_input, training=True)
                     
