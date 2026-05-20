@@ -118,6 +118,9 @@ class EncoderConfig:
     # Do not serialize to disk; use environment variables or pass at runtime.
     api_key: Optional[str] = None
 
+    # Convert PyTorch weights on the fly when loading a HuggingFace model
+    # that ships only PyTorch checkpoints. Persisted by to_dict_for_save /
+    # from_dict so a saved model reloads with the same setting.
     from_pt: Optional[bool] = False
 
     def __post_init__(self):
@@ -157,6 +160,7 @@ class EncoderConfig:
             "encoder_integration": self.encoder_integration.value if self.encoder_integration is not None else None,
             "trainable_encoder": self.trainable_encoder,
             "embedding_dim": self.embedding_dim,
+            "from_pt": self.from_pt,
         }
 
     @classmethod
@@ -182,6 +186,7 @@ class EncoderConfig:
             trainable_encoder=d.get("trainable_encoder", True),
             embedding_dim=d.get("embedding_dim"),
             api_key=None,
+            from_pt=d.get("from_pt", False),
         )
 
     def resolve_identifier(self, encoder_identifier: str) -> tuple[EncoderIntegration, str]:
@@ -330,6 +335,9 @@ class ModelConfig:
     encoder_integration: Optional[EncoderIntegration] = None
     trainable_encoder: bool = True
     embedding_dim: Optional[int] = None
+    # Mirror of EncoderConfig.from_pt for the flat-kwargs path (e.g. when
+    # ModelConfig is reconstructed from a saved JSON config).
+    from_pt: Optional[bool] = False
 
     # Pooling strategy for hierarchical outputs (if applicable)
     # Options: 'concat', 'max', 'mean', 'sum', None (no pooling)
@@ -426,6 +434,7 @@ class ModelConfig:
                 trainable_encoder=self.trainable_encoder,
                 embedding_dim=self.embedding_dim,
                 api_key=None,
+                from_pt=self.from_pt,
             )
 
         # Validate pooling strategy
