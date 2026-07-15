@@ -12,8 +12,8 @@ Main components:
     - utils: Helper functions
 """
 
-__version__ = "0.1.0"
-__author__ = "Isaac D. Mehlhaff and Marco Morucci"
+__version__ = "1.1.0"
+__author__ = "Isaac D. Mehlhaff, Marco Morucci, Josephene Ginting, and Eddie Ye Tian"
 
 # Import public API components
 from multitask.config import ModelConfig, TrainingConfig, EncoderConfig

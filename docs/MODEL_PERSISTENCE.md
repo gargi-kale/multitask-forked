@@ -346,8 +346,8 @@ model, thresholds = load_model('my_model', encoder=custom_encoder)
 Versions mismatch can cause subtle issues. Pin versions in requirements.txt:
 
 ```
-tensorflow==2.15.0
-transformers==4.30.0
+tensorflow>=2.19,<2.20
+transformers>=4.44,<5
 ```
 
 ---

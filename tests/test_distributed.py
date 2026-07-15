@@ -18,11 +18,16 @@ class TestDistributedUtils(unittest.TestCase):
     
     def setUp(self):
         """Setup mocks for TensorFlow."""
+        # Preserve the real TF module (may already be imported at process start) so
+        # tearDown can restore it rather than deleting it. Deleting and re-importing
+        # TF after mock teardown causes Metal's C-level plugin to crash in the same
+        # process on Apple Silicon.
+        self._real_tf = sys.modules.get('tensorflow')
+
         # Mock tensorflow module
         self.tf_mock = MagicMock()
         self.tf_mock.__version__ = '2.15.0'
         self.tf_mock.test.is_built_with_cuda.return_value = False
-        self.tf_mock.test.is_gpu_available.return_value = False
         sys.modules['tensorflow'] = self.tf_mock
         
         # Import after mocking - import module directly to avoid package dependencies
@@ -36,7 +41,9 @@ class TestDistributedUtils(unittest.TestCase):
         
     def tearDown(self):
         """Cleanup mocks."""
-        if 'tensorflow' in sys.modules:
+        if self._real_tf is not None:
+            sys.modules['tensorflow'] = self._real_tf
+        elif 'tensorflow' in sys.modules:
             del sys.modules['tensorflow']
         if 'multitask.utils.distributed' in sys.modules:
             del sys.modules['multitask.utils.distributed']

@@ -164,8 +164,9 @@ outputs/
 test_spider_persistence/
 tfhub_cache/
 
-# Test scripts
+# Test scripts and legacy files
 local_test_runs/
+legacy/
 # cluster_runs/
 
 # Local testing output

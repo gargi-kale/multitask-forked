@@ -213,7 +213,7 @@ def print_device_info():
     
     # Check for GPU support
     print(f"\nBuilt with CUDA: {tf.test.is_built_with_cuda()}")
-    print(f"GPU available: {tf.test.is_gpu_available()}")
+    print(f"GPU available: {len(tf.config.list_physical_devices('GPU')) > 0}")
     
     # List all devices
     print("\nPhysical devices:")
