@@ -4,8 +4,10 @@ Trainer class for multi-task models.
 This module provides the Trainer class that handles training loops, loss computation,
 optimization, and threshold selection for multi-task learning models.
 """
+import contextlib
 import json
 import os
+import platform
 import numpy as np
 import tensorflow as tf
 from typing import Optional, Dict, List, Tuple, Any, Callable, Union
@@ -984,7 +986,20 @@ class Trainer:
             ...     checkpoint_monitor='val_loss'
             ... )
         """
-        with self.strategy.scope():
+        # On Apple Silicon, OneDeviceStrategy.scope() mis-routes dict-output tensors
+        # when the caller has already entered strategy.scope() externally (double-scope).
+        # Since OneDeviceStrategy doesn't replicate variables, the scope is a no-op for
+        # correctness — skip it on Apple Silicon to avoid the Keras routing bug.
+        # On Linux/Windows with MirroredStrategy, scope is required for variable replication.
+        _is_apple_silicon = (
+            platform.system() == 'Darwin' and platform.machine() == 'arm64'
+        )
+        _scope = (
+            contextlib.nullcontext()
+            if _is_apple_silicon and isinstance(self.strategy, tf.distribute.OneDeviceStrategy)
+            else self.strategy.scope()
+        )
+        with _scope:
             # Build or use custom loss function
             # This function encapsulates true multi-task learning: computing and combining
             # individual task losses with automatic task and class weighting

@@ -42,9 +42,9 @@ def _example_dataset():
 train_dataset = _example_dataset()
 val_dataset = _example_dataset()
 
-with strategy.scope():
-    model = MultiTaskModel(model_config)
-    trainer = Trainer(model, training_config, strategy=strategy)
+# Do NOT wrap in strategy.scope() — Trainer.fit() enters scope internally
+model = MultiTaskModel(model_config)
+trainer = Trainer(model, training_config, strategy=strategy)
 
 history, thresholds = trainer.fit(train_dataset, val_dataset, num_tasks=2)
 ```
@@ -106,26 +106,26 @@ strategy, info = get_distribution_strategy('auto', verbose=True)
 # Prepare tf.data.Dataset objects:
 # train_dataset and val_dataset should yield (inputs, labels_dict)
 
-# Create model within strategy scope
-with strategy.scope():
-    encoder_config = EncoderConfig(
-        encoder_integration=EncoderIntegration.TFHUB,
-        encoder_input_type=EncoderInputType.RAW_STRING,
-        encoder_identifier='https://tfhub.dev/google/universal-sentence-encoder/4',
-    )
-    
-    model_config = ModelConfig(
-        task_structure=[[2]],
-        task_names=['sentiment', 'toxicity'],
-        task_types=['multiclass', 'binary'],
-        num_classes_per_task=[3, 2],
-        encoder_config=encoder_config
-    )
-    
-    training_config = TrainingConfig(batch_size=32, epochs=10)
-    
-    model = MultiTaskModel(model_config)
-    trainer = Trainer(model, training_config, strategy=strategy)
+encoder_config = EncoderConfig(
+    encoder_integration=EncoderIntegration.TFHUB,
+    encoder_input_type=EncoderInputType.RAW_STRING,
+    encoder_identifier='https://tfhub.dev/google/universal-sentence-encoder/4',
+)
+
+model_config = ModelConfig(
+    task_structure=[[2]],
+    task_names=['sentiment', 'toxicity'],
+    task_types=['multiclass', 'binary'],
+    num_classes_per_task=[3, 2],
+    encoder_config=encoder_config
+)
+
+training_config = TrainingConfig(batch_size=32, epochs=10)
+
+# Do NOT wrap in strategy.scope() — Trainer.fit() enters scope internally.
+# Pre-scoping causes a shape mismatch error on Mac GPU (OneDeviceStrategy).
+model = MultiTaskModel(model_config)
+trainer = Trainer(model, training_config, strategy=strategy)
 
 # Train
 history, thresholds = trainer.fit(train_dataset, val_dataset, num_tasks=2)
@@ -133,10 +133,9 @@ history, thresholds = trainer.fit(train_dataset, val_dataset, num_tasks=2)
 # Save
 model.save('models/my_model', thresholds=thresholds)
 
-# Load (also in strategy scope)
-with strategy.scope():
-    from multitask import load_model
-    loaded_model, loaded_thresholds = load_model('models/my_model')
+# Load
+from multitask import load_model
+loaded_model, loaded_thresholds = load_model('models/my_model')
 ```
 
 ## Platform-Specific Notes
@@ -146,7 +145,7 @@ with strategy.scope():
 **Setup:**
 ```bash
 # Install TensorFlow with Metal support
-pip install tensorflow-macos tensorflow-metal
+pip install tensorflow-metal==1.2.0
 ```
 
 **Characteristics:**
@@ -211,14 +210,14 @@ import tensorflow as tf
 print(tf.config.list_physical_devices('GPU'))  # Check if TensorFlow sees GPUs
 ```
 - Verify GPU drivers and CUDA/cuDNN versions (Linux/Windows NVIDIA)
-- On Apple Silicon: install `tensorflow-metal`
+- On Apple Silicon: install `tensorflow-metal==1.2.0`
 
 
 **Metal backend errors (Apple Silicon):**
 ```python
 strategy, info = get_distribution_strategy('cpu')  # Fall back to CPU
 ```
-Update TensorFlow: `pip install --upgrade tensorflow-macos tensorflow-metal`
+> **Do not run `pip install --upgrade tensorflow` or `--upgrade tensorflow-metal`** on Apple Silicon. The only compatible Metal plugin is `tensorflow-metal==1.2.0`, which requires TensorFlow 2.19.x. Upgrading either package will break the installation.
 
 **Multi-GPU slower than single GPU:**
 - Batch size should be ≥ `num_gpus * 32`
@@ -234,7 +233,7 @@ This tests platform detection, strategy selection, training, and save/load funct
 
 ## Best Practices
 
-1. Create models inside `strategy.scope()`
+1. Do **not** create models or trainers inside `strategy.scope()` — pass `strategy=strategy` to `Trainer` and let `Trainer.fit()` handle scope internally
 2. Call `setup_gpu_memory_growth()` before creating models
 3. Use `'auto'` mode for automatic platform detection
 4. Scale batch size with GPU count for multi-GPU

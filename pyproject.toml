@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "multitask-py"
-version = "1.0.2"
+version = "1.1.0"
 description = "A flexible multi-task learning library for natural language processing with support for hierarchical task structures."
 readme = "README.md"
 authors = [
@@ -28,10 +28,9 @@ classifiers = [
 keywords = ["deep-learning", "machine-learning", "nlp", "multi-task-learning", "tensorflow", "neural-networks"]
 
 dependencies = [
-    "tensorflow>=2.19,<3",
+    "tensorflow>=2.19,<2.20",
     "tensorflow-hub>=0.16,<1",
-    "tensorflow-text>=2.19,<3",
-    "tf-models-official>=2.19,<3",
+    "tensorflow-text>=2.19,<2.20",
     "numpy>=1.26,<2",
     "scikit-learn>=1.3",
     "pandas>=2.0",
@@ -61,7 +60,7 @@ regression = [
     "scipy>=1.10",
 ]
 text = [
-    "tensorflow-text>=2.19,<3",
+    "tensorflow-text>=2.19,<2.20",
 ]
 dev = [
     "pytest>=9.0",

@@ -240,14 +240,21 @@ class TestPoolsTrainingVsInference:
 class TestFlattenUnflattenWithPools:
     """flatten/unflatten should handle pooled outputs."""
 
-    def test_flatten_includes_pool_keys(self):
+    def test_flatten_excludes_pool_keys(self):
+        """flatten_outputs intentionally excludes pool keys.
+
+        Pools are derived from task outputs, so including their columns would
+        shift alignment and break unflatten_outputs, which reads columns at
+        fixed positions by task_names order.
+        """
         model = make_model(output_pools={
             'pool': {'tasks': ['t0', 't1'], 'strategy': 'max'}
         })
         out = model(random_input(), training=False)
         flat, indices = model.flatten_outputs(out)
-        # Pool key should be in the indices
-        assert 'pool' in indices
+        # Pool keys in the input are gracefully ignored — only task keys appear
+        assert 'pool' not in indices
+        assert all(k in TASK_NAMES_10 for k in indices)
 
     def test_unflatten_recomputes_pools(self):
         """unflatten_outputs should recompute pooled values from task outputs."""

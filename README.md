@@ -37,7 +37,7 @@ pip install multitask-py
 
 This installs the core library and its dependencies:
 
-- TensorFlow (+ TF Hub, TF Text, tf-models-official)
+- TensorFlow 2.19.x (+ TF Hub, TF Text)
 - NumPy
 - scikit-learn
 - pandas
@@ -70,8 +70,10 @@ pip install '.[huggingface]'   # core + HuggingFace support
 
 ### GPU support
 
-- Apple Silicon: `pip install tensorflow-macos tensorflow-metal`
+- Apple Silicon: `pip install tensorflow-metal==1.2.0`
 - NVIDIA: `pip install tensorflow[and-cuda]`
+
+> **Note:** `tensorflow-metal 1.2.0` is compatible with the TF 2.19.x family installed by multitask-py. Do not upgrade TensorFlow to 2.20+ independently — that combination is not supported by any currently available tensorflow-metal release and will produce import errors at runtime.
 
 ### Developers
 
@@ -303,9 +305,10 @@ from multitask import get_distribution_strategy, setup_gpu_memory_growth
 setup_gpu_memory_growth()
 strategy, info = get_distribution_strategy('auto', verbose=True)
 
-with strategy.scope():
-    model = MultiTaskModel(config)
-    trainer = Trainer(model, training_config, strategy=strategy)
+# Do NOT wrap model/trainer creation in strategy.scope() —
+# Trainer.fit() enters the scope internally during compilation.
+model = MultiTaskModel(config)
+trainer = Trainer(model, training_config, strategy=strategy)
 
 trainer.fit(train_dataset, val_dataset, num_tasks=N)
 ```
@@ -440,6 +443,7 @@ setup_gpu_memory_growth()
 - `examples/dataframe_pipeline_example.py`: Pandas DataFrame → `tf.data` → train → evaluate
 - `examples/save_load_example.py`: Model persistence
 - `examples/distributed_training.py`: Distributed training
+- `examples/bert_multitask_example.py`: BERT fine-tuning with hierarchical multi-task branching (requires `[huggingface]` extra)
 
 ## Citation
 

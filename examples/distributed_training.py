@@ -87,16 +87,6 @@ def main():
     print("Step 4: Selecting distribution strategy...")
     strategy, info = get_distribution_strategy('auto', verbose=True)
     
-    # tf.distribute.OneDeviceStrategy + Keras model.fit + dict-shaped y mis-orders label
-    # tensors vs. predictions for mixed task types. Use the default strategy for that case;
-    # MirroredStrategy / GPU OneDeviceStrategy paths are unchanged.
-    if isinstance(strategy, tf.distribute.OneDeviceStrategy):
-        print(
-            "Note: Using default distribution strategy for training (dict labels + "
-            "OneDeviceStrategy are incompatible with mixed task heads in this Keras setup).\n"
-        )
-        strategy = tf.distribute.get_strategy()
-    
     # Step 5: Create synthetic data
     print("Step 5: Creating synthetic data...")
     train_data = create_synthetic_data(n_samples=1000)
@@ -105,46 +95,47 @@ def main():
     print(f"Val samples: {len(val_data)}")
     print()
     
-    # Step 6: Configure model (inside strategy scope)
+    # Step 6: Configure model
     print("Step 6: Configuring model...")
-    with strategy.scope():
-        # Flat five-way split: binary (2 classes), multiclass (5 classes), three binary columns
-        model_config = ModelConfig(
-            task_structure=[[5]],
-            task_names=TASK_NAMES,
-            task_types=['binary', 'multiclass', 'binary', 'binary', 'binary'],
-            num_classes_per_task=[2, 5, 2, 2, 2],
-            shared_layer_sizes=[256, 128],
-            default_layer_sizes=[64],
-            encoder_config=EncoderConfig(
-                encoder_identifier=None,
-                encoder_input_type=EncoderInputType.PRECOMPUTED,
-                embedding_dim=768,
-            ),
-        )
-        
-        training_config = TrainingConfig(
-            learning_rate=1e-3,
-            batch_size=32,
-            epochs=5,
-            early_stopping_patience=3,
-        )
-        
-        print(f"Tasks configured: {model_config.task_names}")
-        print("Mixed task types: binary, multiclass, binary (three additional binary heads)")
-        print()
-    
-    # Step 7: Create model and trainer (inside strategy scope)
+    # Flat five-way split: binary (2 classes), multiclass (5 classes), three binary columns
+    model_config = ModelConfig(
+        task_structure=[[5]],
+        task_names=TASK_NAMES,
+        task_types=['binary', 'multiclass', 'binary', 'binary', 'binary'],
+        num_classes_per_task=[2, 5, 2, 2, 2],
+        shared_layer_sizes=[256, 128],
+        default_layer_sizes=[64],
+        encoder_config=EncoderConfig(
+            encoder_identifier=None,
+            encoder_input_type=EncoderInputType.PRECOMPUTED,
+            embedding_dim=768,
+        ),
+    )
+
+    training_config = TrainingConfig(
+        learning_rate=1e-3,
+        batch_size=32,
+        epochs=5,
+        early_stopping_patience=3,
+    )
+
+    print(f"Tasks configured: {model_config.task_names}")
+    print("Mixed task types: binary, multiclass, binary (three additional binary heads)")
+    print()
+
+    # Step 7: Create model and trainer
+    # Do NOT wrap in strategy.scope() — Trainer.fit() enters the scope internally
+    # during compilation. Pre-scoping causes Keras to mis-route dict-output tensors
+    # under single-GPU (OneDevice) strategies.
     print("Step 7: Creating model and trainer...")
-    with strategy.scope():
-        model = MultiTaskModel(model_config)
-        trainer = Trainer(
-            model=model,
-            config=training_config,
-            strategy=strategy  # Pass strategy to trainer
-        )
-        print("Model and trainer created within distribution strategy scope")
-        print()
+    model = MultiTaskModel(model_config)
+    trainer = Trainer(
+        model=model,
+        config=training_config,
+        strategy=strategy,
+    )
+    print("Model and trainer created")
+    print()
     
     train_ds = dataframe_to_tf_dataset(train_data, training_config.batch_size, shuffle=True)
     val_ds = dataframe_to_tf_dataset(val_data, training_config.batch_size, shuffle=False)
@@ -213,11 +204,9 @@ def main():
         model.save(save_path, thresholds=thresholds)
         print(f"Model saved to {save_path}")
         
-        # Load model (also in strategy scope for consistency)
-        with strategy.scope():
-            from multitask import load_model
-            loaded_model, loaded_thresholds = load_model(save_path)
-            print(f"Model loaded from {save_path}")
+        from multitask import load_model
+        loaded_model, loaded_thresholds = load_model(save_path)
+        print(f"Model loaded from {save_path}")
         
         # Verify loaded model produces same outputs
         loaded_predictions = loaded_model.predict(sample_X)
@@ -233,7 +222,7 @@ def main():
         print("=" * 70)
         print("\nAll tests passed:")
         print("  Cross-platform strategy selection")
-        print("  Model creation in strategy scope")
+        print("  Model creation with distributed strategy")
         print("  Training with distributed strategy")
         print("  Dictionary outputs working correctly")
         print("  Multi-GPU coordination (if applicable)")

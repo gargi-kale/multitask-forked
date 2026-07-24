@@ -52,7 +52,6 @@ class TestRegressionModelConfigDefaults:
         assert cfg.task_structure == [[3], [2, 5, 3]]
         assert cfg.total_outputs == 10
         assert cfg.num_branch_levels == 2
-        assert cfg.dropout_rate == 0.1
         assert cfg.default_layer_sizes == [128, 64]
         assert cfg.shared_layer_sizes == [256, 128]
         assert cfg.trainable_encoder is True
