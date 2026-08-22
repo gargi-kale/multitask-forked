@@ -8,7 +8,7 @@ version = "1.1.0"
 description = "A flexible multi-task learning library for natural language processing with support for hierarchical task structures."
 readme = "README.md"
 authors = [
-    {name = "Isaac D. Mehlhaff", email = "isaac.mehlhaff@gmail.com"},
+    {name = "Isaac Mehlhaff", email = "isaac.mehlhaff@gmail.com"},
     {name = "Marco Morucci", email = "moruccim@msu.edu"},
     {name = "Josephene Ginting", email = "josepheneginting@gmail.com"},
     {name = "Eddie Ye Tian", email = "eddietian06@gmail.com"}
