@@ -448,13 +448,15 @@ setup_gpu_memory_growth()
 ## Citation
 
 ```bibtex
-@software{multitask_py,
-    title = {multitask-py: A Flexible Multi-Task Learning Library for Natural Language Processing},
-    author = {Mehlhaff, Isaac D. and Morucci, Marco and Ginting, Josephene and Tian, Eddie Ye},
-    year = {2026},
-    version = {1.0.1},
-    url = {https://pypi.org/project/multitask-py/},
-    repository = {https://github.com/imehlhaff/multitask}
+@inproceedings{Farzammultitask,
+  title = {Multi-{{Task Learning Improves Performance}} in {{Deep Argument Mining Models}}},
+  author = {Farzam, Amirhossein and Shekhar, Shashank and Mehlhaff, Isaac D. and Morucci, Marco},
+  year = {2024},
+  month = aug,
+  booktitle = {Proceedings of the 11th Workshop on Argument Mining},
+  publisher = {Association for Computational Linguistics},
+  address = {Bangkok, Thailand},
+  pages = {46-58},
 }
 ```
 
