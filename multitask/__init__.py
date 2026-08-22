@@ -13,7 +13,7 @@ Main components:
 """
 
 __version__ = "1.1.0"
-__author__ = "Isaac D. Mehlhaff, Marco Morucci, Josephene Ginting, and Eddie Ye Tian"
+__author__ = "Isaac Mehlhaff, Marco Morucci, Josephene Ginting, and Eddie Ye Tian"
 
 # Import public API components
 from multitask.config import ModelConfig, TrainingConfig, EncoderConfig
