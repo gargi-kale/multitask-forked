@@ -9,6 +9,43 @@ from typing import Optional, Union, Dict, List, Any, Tuple
 from multitask.config import ModelConfig, EncoderConfig, EncoderInputType, EncoderIntegration
 
 
+POOL_EPS = 1e-7
+
+
+def pool_probabilities(stacked: tf.Tensor, strategy: str, axis: int = 1) -> tf.Tensor:
+    """Pool sigmoid probabilities along ``axis`` (the constituent-task axis).
+
+    - 'max' / 'mean' / 'min': the plain reduction. The gradient of 'max'
+      reaches only the highest head in each row.
+    - 'noisy_or': 1 - prod(1 - p_i), the probability that at least one
+      constituent is positive if they were independent. Every head gets a
+      gradient, scaled by how much the others leave room for it.
+    - 'lse': sigmoid(logsumexp(z_i)) with z_i = logit(p_i), i.e.
+      sum(e^z) / (1 + sum(e^z)): 1 - P(none) under a softmax over the
+      constituents plus a fixed "none" option with logit 0. A smooth max over
+      the logits (temperature 1); each head's gradient share is its softmax
+      weight.
+
+    Probabilities are clipped to [1e-7, 1 - 1e-7] before the logs, as Keras
+    BCE does.
+    """
+    if strategy == 'max':
+        return tf.reduce_max(stacked, axis=axis)
+    if strategy == 'mean':
+        return tf.reduce_mean(stacked, axis=axis)
+    if strategy == 'min':
+        return tf.reduce_min(stacked, axis=axis)
+    if strategy in ('noisy_or', 'lse'):
+        dtype = stacked.dtype
+        p = tf.clip_by_value(tf.cast(stacked, tf.float32), POOL_EPS, 1.0 - POOL_EPS)
+        if strategy == 'noisy_or':
+            out = 1.0 - tf.exp(tf.reduce_sum(tf.math.log1p(-p), axis=axis))
+        else:
+            z = tf.math.log(p) - tf.math.log1p(-p)
+            out = tf.sigmoid(tf.reduce_logsumexp(z, axis=axis))
+        return tf.cast(out, dtype)
+    raise ValueError(f"Unknown pooling strategy: {strategy}")
+
 def _get_api_encoder_classes():
     """Lazy-load encoder classes to avoid pulling in optional deps at import time."""
     from .encoders import OpenAIEncoder, CohereEncoder, VoyageEncoder, HFInferenceEncoder
@@ -403,15 +440,7 @@ class MultiTaskModel(tf.keras.Model):
             stacked = tf.stack(constituent_tensors, axis=1)
             
             # Apply the pooling operation along the task axis.
-            strategy = pool_cfg['strategy']
-            if strategy == 'max':
-                pooled[pool_name] = tf.reduce_max(stacked, axis=1)
-            elif strategy == 'mean':
-                pooled[pool_name] = tf.reduce_mean(stacked, axis=1)
-            elif strategy == 'min':
-                pooled[pool_name] = tf.reduce_min(stacked, axis=1)
-            else:
-                raise ValueError(f"Unknown pooling strategy: {strategy}")
+            pooled[pool_name] = pool_probabilities(stacked, pool_cfg['strategy'], axis=1)
         
         return pooled
     
@@ -432,7 +461,22 @@ class MultiTaskModel(tf.keras.Model):
         """
         # Encode input
         x = self._encode_input(inputs, training=training)
-        
+        return self.forward_from_encoding(x, training=training)
+
+    def forward_from_encoding(
+        self,
+        x: tf.Tensor,
+        training: Optional[bool] = None
+    ) -> Dict[str, tf.Tensor]:
+        """Run the shared, branch and output layers on an already-encoded batch.
+
+        Args:
+            x: Encoded representation, as returned by ``_encode_input``
+            training: Whether in training mode
+
+        Returns:
+            Dictionary mapping task names to outputs (tasks + optional pools)
+        """
         # Apply shared layers
         for layer in self.shared_layers:
             x = layer(x, training=training)
@@ -706,7 +750,7 @@ class MultiTaskModel(tf.keras.Model):
         
         Returns a list where each element corresponds to a pooled output:
         - 'name': Pool name
-        - 'strategy': Pooling operation ('max', 'mean', 'min')
+        - 'strategy': Pooling operation ('max', 'mean', 'min', 'noisy_or', 'lse')
         - 'task_type': Type of the pooled output ('binary', etc.)
         - 'num_classes': Number of classes for the pooled output
         - 'constituent_tasks': List of task names that are pooled

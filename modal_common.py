@@ -28,6 +28,7 @@ image = (
         "tensorflow[and-cuda]>=2.19,<2.20",
         "tensorflow-hub>=0.16,<1",
         "tensorflow-text>=2.19,<2.20",
+        "tf-keras>=2.19,<2.20",  # Keras 2, selected by TF_USE_LEGACY_KERAS below
         "numpy>=1.26,<2",
         "scikit-learn>=1.3",
         "pandas>=2.0",
@@ -50,6 +51,10 @@ image = (
             "TFHUB_CACHE_DIR": "/cache/tfhub",
             # Quieter logs; TF is very chatty at startup.
             "TF_CPP_MIN_LOG_LEVEL": "2",
+            # Run tf.keras as Keras 2 (tf_keras). HuggingFace's TF encoders are
+            # tf_keras models, and a Keras 3 model doesn't track their weights,
+            # so under Keras 3 the encoder silently never trains.
+            "TF_USE_LEGACY_KERAS": "1",
         }
     )
     # Ship this module itself into the container. Modal auto-includes only the

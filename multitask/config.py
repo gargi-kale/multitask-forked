@@ -526,7 +526,7 @@ class ModelConfig:
             3. Pool names don't collide with task_names
             4. All referenced task names exist in task_names
             5. A task cannot belong to multiple pools
-            6. Strategy is one of: 'max', 'mean', 'min'
+            6. Strategy is one of: 'max', 'mean', 'min', 'noisy_or', 'lse'
             7. Optional task_type is valid
             8. Optional num_classes is >= 2
             9. Each pool references at least 2 tasks
@@ -546,7 +546,7 @@ class ModelConfig:
             )
         
         task_name_set = set(self.task_names)
-        valid_strategies = {'max', 'mean', 'min'}
+        valid_strategies = {'max', 'mean', 'min', 'noisy_or', 'lse'}
         valid_pool_types = {'binary', 'multiclass', 'multilabel'}
         
         # Track which tasks have already been assigned to a pool.

@@ -1,9 +1,12 @@
 import tensorflow as tf
-import keras
+
+# tf.keras, not `import keras`: under TF_USE_LEGACY_KERAS=1 the model and its
+# optimizer are tf_keras (Keras 2), and the schedule must match them.
+keras = tf.keras
 
 class WarmUpWrapper(keras.optimizers.schedules.LearningRateSchedule):
     """
-    Keras 3 native warmup wrapper.
+    Warmup wrapper for Keras 2 (tf_keras) or Keras 3, whichever tf.keras is.
     """
     def __init__(self, warmup_steps, decay_schedule_fn, initial_learning_rate, name=None):
         super().__init__()

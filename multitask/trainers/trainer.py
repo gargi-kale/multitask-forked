@@ -551,7 +551,9 @@ class Trainer:
             stacked_float[~valid] = np.nan
             
             with np.errstate(all='ignore'):  # suppress nanmean warnings for all-NaN slices
-                if strategy == 'max':
+                # noisy_or / lse pool scores, not labels: their label is still
+                # "any constituent positive" (noisy-OR of 0/1 labels is the max).
+                if strategy in ('max', 'noisy_or', 'lse'):
                     pooled = np.nanmax(stacked_float, axis=1)
                 elif strategy == 'mean':
                     pooled = np.nanmean(stacked_float, axis=1)
@@ -1226,6 +1228,7 @@ class Trainer:
         Returns:
             Dictionary containing:
                 - 'probabilities_dict': Dict of predicted probabilities {name: [n_samples, n_classes]}
+                - 'labels_dict': Dict of true labels, pools included (mask_value where missing)
                 - 'predictions_dict': Dict of binary predictions (if thresholds provided)
                 - 'task_metrics': Per-task metrics dict {task_name: {metric: value}}
                 - 'pool_metrics': Per-pool metrics dict {pool_name: {metric: value}} (if pools configured)
@@ -1440,6 +1443,8 @@ class Trainer:
                 if 'f1' in metrics:
                     f1 = f1_score(y_out_true_binary, y_out_pred_binary, average=avg_method, zero_division=0)
                     output_results['f1'] = float(f1)
+                    output_results['f1_macro'] = float(f1_score(
+                        y_out_true_binary, y_out_pred_binary, average='macro', zero_division=0))
                     if not is_pool:
                         overall_clf_metrics['f1'].append(f1)
             elif task_type == 'multiclass' and use_thresholds is not None:
@@ -1504,6 +1509,7 @@ class Trainer:
         # Build results dictionary
         results = {
             'probabilities_dict': y_pred_dict,
+            'labels_dict': y_true_dict,
             'task_metrics': task_metrics,
             'overall_metrics': overall_metrics
         }
