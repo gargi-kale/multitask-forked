@@ -357,6 +357,6 @@ class BalancedMaskedLMTrainer(MaskedLMTrainer):
 
     def fit(self, train_dataset, *args, **kwargs):
         self.prepare(train_dataset)
-        num_tasks = len(self.model.task_names) - len(self.pooled_tasks) + 1
+        num_tasks = len(self.model.task_names) - len(self.pooled_tasks) + bool(self.pooled_tasks)
         attach_mlm_balancing(self.model, self.balancer_name, self.mlm_mode, num_tasks)
         return PooledOutputLossTrainer.fit(self, train_dataset, *args, **kwargs)

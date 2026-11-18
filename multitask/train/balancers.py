@@ -166,7 +166,7 @@ class BalancedLossTrainer(PooledOutputLossTrainer):
 
     def fit(self, train_dataset, *args, **kwargs):
         self.model(next(iter(train_dataset))[0], training=False)  # create all variables
-        num_tasks = len(self.model.task_names) - len(self.pooled_tasks) + 1
+        num_tasks = len(self.model.task_names) - len(self.pooled_tasks) + bool(self.pooled_tasks)
         if self.balancer_name == "famo":
             bal = FAMO(num_tasks)
         elif self.balancer_name == "dbmtl":

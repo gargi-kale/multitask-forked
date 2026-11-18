@@ -113,6 +113,11 @@ class PooledOutputLossTrainer(Trainer):
         ]
         # No pooled tasks (a --tasks subset without propaganda): plain terms only.
         has_pool = bool(self.pooled_tasks)
+        # The model output that reports the pool: the config's output pool over
+        # these tasks (propaganda_max_pool on the paper's data).
+        pool_output = next((name for name, p in (getattr(self.model.config, "output_pools", None) or {}).items()
+                            if list(p.get("tasks", [])) == list(self.pooled_tasks)),
+                           "propaganda_max_pool")
         if has_pool:
             pool_factor = float(task_weights[names.index(self.pooled_tasks[0])])
             pw0 = float(self.pooled_class_weights[0])
@@ -200,7 +205,7 @@ class PooledOutputLossTrainer(Trainer):
 
         def pooled_loss(y_true_dict, y_pred_dict, soft=None):
             """``soft`` (self-distillation) maps an output name (a task, or
-            propaganda_max_pool for the pool) to (target [B], on)."""
+            the pool's output name) to (target [B], on)."""
             soft = soft or {}
             total, n_valid = 0.0, 0.0
             for n, w0, w1, f, shift, gamma in terms:
@@ -212,7 +217,7 @@ class PooledOutputLossTrainer(Trainer):
                 # mask_value (-1) is below both classes, so the max is masked only
                 # when every constituent label is masked.
                 s, c = pooled_term(y_true_dict, y_pred_dict, pool_factor,
-                                   soft=soft.get("propaganda_max_pool"))
+                                   soft=soft.get(pool_output))
                 total += s
                 n_valid += c
             return total / (n_valid + 1e-7)
@@ -231,5 +236,5 @@ class PooledOutputLossTrainer(Trainer):
         self.model._mtl_task_losses_fn = task_losses
         self.model._mtl_pooled_tasks = list(self.pooled_tasks)
         self.model._mtl_task_loss_names = (
-            (["propaganda_max_pool"] if has_pool else []) + [t[0] for t in terms])
+            ([pool_output] if has_pool else []) + [t[0] for t in terms])
         return pooled_loss

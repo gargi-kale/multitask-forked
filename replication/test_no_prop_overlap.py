@@ -660,43 +660,8 @@ def run_all_task_types_deep_grouped(args: argparse.Namespace) -> None:
         show_structure=args.show_structure
     )
 
-PAPER_TRAINING_CONFIG = TrainingConfig(
-    optimizer_type="adamw",
-    learning_rate=0.0003,
-    weight_decay_rate=0.01,
-    dropout_rate=0.4,
-    batch_size=256,
-    warmup_percent=5
-)
-
-# Head sizes for paper_replication (--arch). "paper" is what the paper
-# describes; "legacy" is what multitask_basic/models/model.py actually builds
-# (each size appears twice because it zips one dense layer per size pair).
-# "wide" keeps the paper's depth at the legacy widths; "medium" sits between.
-PAPER_ARCHITECTURES: Dict[str, Tuple[List[int], List[List[int]]]] = {
-    "paper": ([64, 32], [[32, 16], [16, 8]]),
-    "medium": ([128, 64], [[64, 32], [32, 16]]),
-    "wide": ([256, 128], [[128, 64], [64, 32]]),
-    "legacy": ([256, 256, 128, 128], [[128, 128, 64, 64], [64, 64, 32, 32]]),
-    # Shared-depth study (modal_replicate.py::depth). Names are
-    # s<shared layers>_t<task-type layers>_k<task-specific layers>[_variant].
-    # A: shared depth 1-6, branches fixed at wide's 128>64 / 64>32.
-    "s1_t2_k2": ([128], [[128, 64], [64, 32]]),
-    "s3_t2_k2": ([256, 256, 128], [[128, 64], [64, 32]]),
-    "s4_t2_k2": ([256, 256, 128, 128], [[128, 64], [64, 32]]),
-    "s6_t2_k2": ([256, 256, 256, 128, 128, 128], [[128, 64], [64, 32]]),
-    # B: shared width at depth 2, branches fixed.
-    "s2_t2_k2_narrow": ([128, 128], [[128, 64], [64, 32]]),
-    "s2_t2_k2_wider": ([512, 256], [[128, 64], [64, 32]]),
-    # C: six layers in total, moved between shared and branches.
-    "s3_t1_k2": ([256, 256, 128], [[128], [64, 32]]),
-    "s3_t2_k1": ([256, 256, 128], [[128, 64], [32]]),
-    "s4_t1_k1": ([256, 256, 128, 128], [[64], [32]]),
-    "s1_t3_k2": ([256], [[128, 128, 64], [64, 32]]),
-    # D: shared fixed at wide's 256>128, branch depth changed.
-    "s2_t1_k1": ([256, 128], [[128], [64]]),
-    "s2_t3_k3": ([256, 128], [[128, 128, 64], [64, 64, 32]]),
-}
+# PAPER_TRAINING_CONFIG and PAPER_ARCHITECTURES moved to multitask/train/methods.py.
+from multitask.train.methods import PAPER_ARCHITECTURES, PAPER_TRAINING_CONFIG  # noqa: E402,F401
 
 
 def run_paper_replication(args: argparse.Namespace) -> None:

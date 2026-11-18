@@ -236,7 +236,7 @@ class LabelAwareMaskedTrainer(BalancedMaskedLMTrainer):
         if steps < 0:
             raise ValueError("The consistency ramp needs a train dataset of known length")
         self.prepare(train_dataset)
-        num_tasks = len(self.model.task_names) - len(self.pooled_tasks) + 1
+        num_tasks = len(self.model.task_names) - len(self.pooled_tasks) + bool(self.pooled_tasks)
         attach_mlm_balancing(self.model, self.balancer_name, self.mlm_mode, num_tasks)
         self.model.attach_label_aware(self.masked_label_weight, self.consistency_weight,
                                       round(self.consistency_rampup_epochs * steps),
@@ -423,7 +423,7 @@ class TeacherConsistencyTrainer(BalancedLossTrainer):
             raise ValueError("The consistency ramp needs a train dataset of known length")
         x = next(iter(train_dataset))[0]
         self.model(x, training=False)  # create all variables
-        self.model._balancer = FAMO(len(self.model.task_names) - len(self.pooled_tasks) + 1)
+        self.model._balancer = FAMO(len(self.model.task_names) - len(self.pooled_tasks) + bool(self.pooled_tasks))
         teacher = None
         if self.teacher_name == "ema":
             teacher = MultiTaskModel(self.model.config, dropout_rate=self.model.dropout_rate)

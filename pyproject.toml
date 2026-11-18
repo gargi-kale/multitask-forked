@@ -35,7 +35,16 @@ dependencies = [
     "scikit-learn>=1.3",
     "pandas>=2.0",
     "pyyaml>=6.0",
+    # the toolkit (multitask.train, the `multitask` command)
+    "tf-keras>=2.19,<2.20",
+    "transformers>=4.44,<5",
+    "huggingface-hub>=0.36",
+    "torch>=2.6,<3",
+    "scipy>=1.10",
 ]
+
+[project.scripts]
+multitask = "multitask.cli:main"
 
 [project.optional-dependencies]
 huggingface = [
@@ -46,6 +55,7 @@ huggingface = [
 ]
 openai = [
     "openai>=2.0",
+    "tiktoken>=0.7",
     "diskcache>=5.0",
 ]
 cohere = [
@@ -78,7 +88,7 @@ Repository = "https://github.com/imehlhaff/multitask.git"
 "Bug Tracker" = "https://github.com/imehlhaff/multitask/issues"
 
 [tool.setuptools]
-packages = ["multitask", "multitask.models", "multitask.layers", "multitask.trainers", "multitask.utils"]
+packages = ["multitask", "multitask.models", "multitask.layers", "multitask.trainers", "multitask.utils", "multitask.train"]
 
 [tool.setuptools.package-data]
 multitask = ["py.typed"]

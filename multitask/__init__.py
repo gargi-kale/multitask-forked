@@ -15,6 +15,15 @@ Main components:
 __version__ = "1.1.0"
 __author__ = "Isaac Mehlhaff, Marco Morucci, Josephene Ginting, and Eddie Ye Tian"
 
+# HuggingFace's TensorFlow encoders are Keras 2 (tf_keras) models. Under Keras 3
+# a model doesn't track their weights, so the encoder silently never trains.
+# Select Keras 2 before TensorFlow is first imported, unless the caller chose.
+import importlib.util as _importlib_util
+import os as _os
+
+if _importlib_util.find_spec("tf_keras") is not None:
+    _os.environ.setdefault("TF_USE_LEGACY_KERAS", "1")
+
 # Import public API components
 from multitask.config import ModelConfig, TrainingConfig, EncoderConfig
 from multitask.models import MultiTaskModel

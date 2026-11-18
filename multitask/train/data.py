@@ -84,6 +84,24 @@ def trim_padding(x, y):
 ROW_ID_KEY = "__row"
 
 
+def random_hidden_cells(labels: Dict[str, np.ndarray], columns: Sequence[str], share: float,
+                        seed: Optional[int], mask_value: float = -1.0) -> Dict[str, np.ndarray]:
+    """{column: row positions to hide} for the random-hiding ablation: in each
+    column, exactly round(share x labelled rows) of its labelled train cells,
+    drawn independently per column (in ``columns`` order) from one generator
+    seeded by ``seed``. On columns with no missing labels this draws the same
+    cells as hatespeech/run_hatespeech.py ``hidden_cells`` for the same seed."""
+    if not 0.0 <= share < 1.0:
+        raise ValueError(f"hide share must be in [0, 1), got {share}")
+    rng = np.random.default_rng(seed or 0)
+    out = {}
+    for col in columns:
+        rows = np.flatnonzero(labels[col] != mask_value)
+        k = int(round(share * rows.size))
+        out[col] = np.sort(rows[rng.choice(rows.size, size=k, replace=False)])
+    return out
+
+
 def load_splits(
     label_columns: Sequence[str] = (),
     *,
@@ -110,6 +128,7 @@ def load_splits(
     repeat_train: int = 1,
     embedding_source: Optional[Any] = None,
     length_chunk_batches: int = 0,
+    train_hide_share: float = 0.0,
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset, tf.data.Dataset]:
     """``drop_unlabeled_train`` removes train rows where every requested label
     is missing (they add no loss, only steps). Val/test keep every row so that
@@ -138,7 +157,10 @@ def load_splits(
     batch to its own longest text instead of to ``max_length``
     (``trim_padding``): train batches group texts of similar length
     (``length_grouped_batches``, chunks of that many batches, sources read
-    from the ``dataset`` column), val and test keep the CSV order."""
+    from the ``dataset`` column), val and test keep the CSV order.
+    ``train_hide_share`` > 0 hides that share of every label column's train
+    labels, chosen by ``random_hidden_cells`` (random-hiding ablation); val
+    and test keep them."""
     multilabel_groups = multilabel_groups or {}
     if length_chunk_batches:
         if stratify_on or embedding_source is not None or (
@@ -182,6 +204,14 @@ def load_splits(
                 n_hidden += int((labels[col] != mask_value).sum())
                 labels[col] = np.full_like(labels[col], mask_value)
             print(f"train: hid all {n_hidden:,} labels of {list(hide_train_columns)}")
+
+        if split == "train" and train_hide_share:
+            cells = random_hidden_cells(labels, label_columns, train_hide_share, seed, mask_value)
+            for col, rows in cells.items():
+                labels[col] = labels[col].copy()
+                labels[col][rows] = mask_value
+            print(f"train: hid {sum(r.size for r in cells.values()):,} label cells "
+                  f"({100 * train_hide_share:g}% of each column's labels)")
 
         if split == "train" and train_label_share:
             for col, share in train_label_share.items():
