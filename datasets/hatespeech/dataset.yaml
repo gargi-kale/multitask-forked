@@ -1,0 +1,54 @@
+# Measuring Hate Speech (D-Lab), cleaned and split by hatespeech/prepare_hatespeech.py:
+# hatespeech_{train,val,test}.csv. Put them here or use --data hatespeech=/path/to/folder
+#
+# The 10 survey items are averaged scores; each becomes a yes/no label by a cut-off:
+# > 2 for the 0-4 items, >= 1 for hatespeech (0-2), as in hatespeech/run_hatespeech.py.
+# The 66 target_* columns, platform, n_annotators and hate_speech_score are not used.
+name: hatespeech
+data_dir: .
+files:
+  train: hatespeech_train.csv
+  val: hatespeech_val.csv
+  test: hatespeech_test.csv
+text_column: text
+tasks:
+- name: sentiment_bi
+  column: sentiment
+  group: hatespeech
+  binarize: '>2'
+- name: respect_bi
+  column: respect
+  group: hatespeech
+  binarize: '>2'
+- name: insult_bi
+  column: insult
+  group: hatespeech
+  binarize: '>2'
+- name: humiliate_bi
+  column: humiliate
+  group: hatespeech
+  binarize: '>2'
+- name: status_bi
+  column: status
+  group: hatespeech
+  binarize: '>2'
+- name: dehumanize_bi
+  column: dehumanize
+  group: hatespeech
+  binarize: '>2'
+- name: violence_bi
+  column: violence
+  group: hatespeech
+  binarize: '>2'
+- name: genocide_bi
+  column: genocide
+  group: hatespeech
+  binarize: '>2'
+- name: attack_defend_bi
+  column: attack_defend
+  group: hatespeech
+  binarize: '>2'
+- name: hatespeech_bi
+  column: hatespeech
+  group: hatespeech
+  binarize: '>=1'

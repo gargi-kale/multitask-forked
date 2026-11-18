@@ -1,0 +1,173 @@
+# IAC + Propaganda + IBM (the paper's data): no_prop_overlap_{train,val,test}.csv.
+# Put the three files in this folder, or point to them: --data iac=/path/to/folder
+#
+# Outputs are the paper's ten (Table 3): the 18 propaganda technique heads are
+# merged into one Propaganda output (max), plus Argument Quality (WA_bi) and the
+# 8 IAC discourse labels. Three task groups: propaganda_binary, wa_bi, discourse.
+#
+# consistency_skip: Propaganda rows carry IAC labels made by a rule from the
+# technique tags (not annotators), so famo_consf1_m5 keeps those rows out of the
+# IAC heads' consistency targets. To remove the rule labels altogether (every
+# result from Nov 6 2026 on), add:  --hide-source Propaganda:group:discourse
+name: iac
+data_dir: .
+files:
+  train: no_prop_overlap_train.csv
+  val: no_prop_overlap_val.csv
+  test: no_prop_overlap_test.csv
+text_column: text
+source_column: dataset
+tasks:
+- name: Loaded_Language
+  group: propaganda_binary
+  missing:
+  - -1.0
+- name: Slogans
+  group: propaganda_binary
+  missing:
+  - -1.0
+- name: Black-and-White_Fallacy
+  group: propaganda_binary
+  missing:
+  - -1.0
+- name: Flag-Waving
+  group: propaganda_binary
+  missing:
+  - -1.0
+- name: Name_Calling
+  group: propaganda_binary
+  missing:
+  - -1.0
+- name: Whataboutism
+  group: propaganda_binary
+  missing:
+  - -1.0
+- name: Causal_Oversimplification
+  group: propaganda_binary
+  missing:
+  - -1.0
+- name: Exaggeration_Minimisation
+  column: Exaggeration,Minimisation
+  group: propaganda_binary
+  missing:
+  - -1.0
+- name: Doubt
+  group: propaganda_binary
+  missing:
+  - -1.0
+- name: Appeal_to_Authority
+  group: propaganda_binary
+  missing:
+  - -1.0
+- name: Repetition
+  group: propaganda_binary
+  missing:
+  - -1.0
+- name: Appeal_to_fear-prejudice
+  group: propaganda_binary
+  missing:
+  - -1.0
+- name: Red_Herring
+  group: propaganda_binary
+  missing:
+  - -1.0
+- name: Thought-terminating_Cliches
+  group: propaganda_binary
+  missing:
+  - -1.0
+- name: Reductio_ad_hitlerum
+  group: propaganda_binary
+  missing:
+  - -1.0
+- name: Bandwagon
+  group: propaganda_binary
+  missing:
+  - -1.0
+- name: Obfuscation_Intentional_Vagueness_Confusion
+  column: Obfuscation,Intentional_Vagueness,Confusion
+  group: propaganda_binary
+  missing:
+  - -1.0
+- name: Straw_Men
+  group: propaganda_binary
+  missing:
+  - -1.0
+- name: WA_bi
+  group: wa_bi
+  missing:
+  - -1.0
+- name: disagree_agree_bi
+  group: discourse
+- name: attacking_respectful_bi
+  group: discourse
+- name: emotion_fact_bi
+  group: discourse
+- name: nasty_nice_bi
+  group: discourse
+- name: personal_audience_bi
+  group: discourse
+- name: defeater_undercutter_bi
+  group: discourse
+- name: negotiate_attack_bi
+  group: discourse
+- name: questioning_asserting_bi
+  group: discourse
+pools:
+- name: propaganda_max_pool
+  tasks:
+  - Loaded_Language
+  - Slogans
+  - Black-and-White_Fallacy
+  - Flag-Waving
+  - Name_Calling
+  - Whataboutism
+  - Causal_Oversimplification
+  - Exaggeration_Minimisation
+  - Doubt
+  - Appeal_to_Authority
+  - Repetition
+  - Appeal_to_fear-prejudice
+  - Red_Herring
+  - Thought-terminating_Cliches
+  - Reductio_ad_hitlerum
+  - Bandwagon
+  - Obfuscation_Intentional_Vagueness_Confusion
+  - Straw_Men
+  strategy: max
+outputs:
+- propaganda_max_pool
+- disagree_agree_bi
+- emotion_fact_bi
+- attacking_respectful_bi
+- nasty_nice_bi
+- personal_audience_bi
+- defeater_undercutter_bi
+- negotiate_attack_bi
+- questioning_asserting_bi
+- WA_bi
+consistency_skip:
+  group:discourse: pool:propaganda_max_pool
+reference:
+  title: Paper Table 3, multi-task, small BERT
+  f1:
+    propaganda_max_pool: 61.74
+    disagree_agree_bi: 71.38
+    emotion_fact_bi: 63.93
+    attacking_respectful_bi: 68.07
+    nasty_nice_bi: 73.69
+    personal_audience_bi: 65.69
+    defeater_undercutter_bi: 55.65
+    negotiate_attack_bi: 64.81
+    questioning_asserting_bi: 63.23
+    WA_bi: 79.17
+labels:
+  propaganda_max_pool: Propaganda
+  disagree_agree_bi: Disagree/Agree
+  emotion_fact_bi: Emotion/Fact
+  attacking_respectful_bi: Attacking/Respectful
+  nasty_nice_bi: Nasty/Nice
+  personal_audience_bi: Personal/Audience
+  defeater_undercutter_bi: Defeater/Undercutter
+  negotiate_attack_bi: Negotiate/Attack
+  questioning_asserting_bi: Questioning/Asserting
+  WA_bi: Argument Quality

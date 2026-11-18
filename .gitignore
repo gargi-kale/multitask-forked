@@ -189,3 +189,6 @@ notes/
 
 # multitask train output
 runs/
+
+# bundled dataset descriptions (the data itself stays ignored)
+!datasets/*/dataset.yaml
