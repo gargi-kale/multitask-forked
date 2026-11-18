@@ -50,7 +50,7 @@ Options:
     --learning-rate LR      Learning rate (default: 4e-5)
     --no-optimize-thresh    Disable threshold optimization
     --verbose N             Keras verbosity 0/1/2 (default: 1)
-    --encoder {distilbert,tfhub-bert,small-bert}
+    --encoder {distilbert,tfhub-bert,small-bert,electra-small,electra-small-L2,electra-small-L4,electra-small-L6,openai-small,openai-large}
                             Encoder config to use (default: distilbert)
 """
 
@@ -157,10 +157,82 @@ ecfg_small_bert = EncoderConfig(
     from_pt=True
 )
 
+# ELECTRA-small's discriminator: 12 layers, hidden 256, ~13.5M parameters. It
+# uses BERT's uncased vocabulary (the vocab files are identical), so the
+# tokenizer in load_splits and the special ids in mask_tokens apply unchanged.
+# It has no pooler, so the model reads the [CLS] position of the last layer,
+# and no masked-word head (see NoMLMHead).
+ecfg_electra_small = EncoderConfig(
+    encoder_identifier="google/electra-small-discriminator",
+    encoder_input_type=EncoderInputType.HUGGINGFACE_TOKENS,
+    encoder_integration=EncoderIntegration.HUGGINGFACE,
+    trainable_encoder=True,
+)
+
+
+def shortened_electra_small(num_layers: int) -> EncoderConfig:
+    """ELECTRA-small cut down to its embeddings and first `num_layers` of 12
+    transformer layers, which keep their pretrained weights; the layers above
+    are dropped. There is no official ELECTRA checkpoint smaller than
+    ELECTRA-small. Parameters: 2 layers ~5.6M (the small BERT has ~4.4M),
+    4 layers ~7.2M, 6 layers ~8.7M, all 12 ~13.5M."""
+    return EncoderConfig(
+        encoder_identifier="google/electra-small-discriminator",
+        encoder_input_type=EncoderInputType.HUGGINGFACE_TOKENS,
+        encoder_integration=EncoderIntegration.HUGGINGFACE,
+        trainable_encoder=True,
+        encoder_kwargs={"num_hidden_layers": num_layers},
+    )
+
+
+# OpenAI embedding models (paper_replication only). The model is frozen, so its
+# vectors are embedded once, stored (openai_embeddings.py, filled by
+# `modal run modal_embed.py::embed`) and fed to the model as pre-computed
+# inputs: there is no encoder in the model, and nothing below the shared layers
+# trains. --encoder name: OpenAI model.
+OPENAI_EMBEDDING_MODELS = {
+    "openai-small": "text-embedding-3-small",  # 1,536 numbers per text
+    "openai-large": "text-embedding-3-large",  # 3,072 numbers per text
+}
+OPENAI_EMBEDDING_DIMS = {"openai-small": 1536, "openai-large": 3072}
+
+
+def precomputed_embeddings(embedding_dim: int) -> EncoderConfig:
+    return EncoderConfig(
+        encoder_input_type=EncoderInputType.PRECOMPUTED,
+        embedding_dim=embedding_dim,
+        trainable_encoder=False,
+    )
+
+
+def openai_embedding_source(encoder: str, cache_root: str):
+    """texts -> float32 [n, dim] from the stored vectors of ``encoder``.
+
+    OpenAI vectors have length 1, so each of their ``dim`` numbers is tiny
+    (about 1 / sqrt(dim) = 0.026 for openai-small), far below the roughly
+    unit-sized BERT outputs the dense layers' initialisation expects. The
+    vectors are multiplied by sqrt(dim) so their numbers are about unit-sized;
+    this rescales every text alike and changes no direction or similarity."""
+    from openai_embeddings import load_embeddings
+
+    model = OPENAI_EMBEDDING_MODELS[encoder]
+    scale = np.float32(np.sqrt(OPENAI_EMBEDDING_DIMS[encoder]))
+
+    def source(texts: Sequence[str]) -> np.ndarray:
+        return load_embeddings(texts, model, cache_root) * scale
+
+    return source
+
+
 ENCODER_CONFIGS = {
     "distilbert": ecfg_distilbert_uncased,
     "tfhub-bert": ecfg_tfhub_bert,
     "small-bert": ecfg_small_bert,
+    "electra-small": ecfg_electra_small,
+    "electra-small-L2": shortened_electra_small(2),
+    "electra-small-L4": shortened_electra_small(4),
+    "electra-small-L6": shortened_electra_small(6),
+    **{name: precomputed_embeddings(dim) for name, dim in OPENAI_EMBEDDING_DIMS.items()},
 }
 
 # ---------------------------------------------------------------------------
@@ -188,6 +260,45 @@ def dealt_batches(levels: Sequence[np.ndarray], batch_size: int,
     batch = np.empty(n, dtype=np.int64)
     batch[np.lexsort(keys)] = (np.arange(n) + rng.integers(n_batches)) % n_batches
     return np.split(np.argsort(batch), np.cumsum(np.bincount(batch))[:-1])
+
+
+def length_grouped_batches(lengths: np.ndarray, sources: np.ndarray, batch_size: int,
+                           chunk_batches: int, rng: np.random.Generator) -> List[np.ndarray]:
+    """One epoch of index batches in which texts of similar length share a
+    batch, so each batch can be padded to its own longest text instead of to
+    ``max_length``.
+
+    The rows are shuffled and cut into chunks of ``chunk_batches`` batches.
+    Inside a chunk every row gets its length rank *within its own source*, as
+    a share of that source's rows in the chunk; the chunk is sorted by that
+    share and cut into batches. Batch i of a chunk therefore holds the i-th
+    length slice of every source: lengths are similar within a source, and
+    each batch keeps the chunk's mix of sources (plain sorting by length would
+    put the long forum posts in batches of their own). The batches of the
+    epoch are then shuffled. Every row appears exactly once."""
+    n = len(lengths)
+    perm = rng.permutation(n)
+    batches: List[np.ndarray] = []
+    for start in range(0, n, batch_size * chunk_batches):
+        idx = perm[start:start + batch_size * chunk_batches]
+        share = np.empty(len(idx))
+        for s in np.unique(sources[idx]):
+            rows = np.flatnonzero(sources[idx] == s)
+            # stable sort of shuffled rows: ties in length stay in random order
+            rows = rows[np.argsort(lengths[idx[rows]], kind="stable")]
+            share[rows] = (np.arange(len(rows)) + 0.5) / len(rows)
+        idx = idx[np.argsort(share, kind="stable")]
+        batches += [idx[i:i + batch_size] for i in range(0, len(idx), batch_size)]
+    return [batches[i] for i in rng.permutation(len(batches))]
+
+
+def trim_padding(x, y):
+    """Cut a tokenized batch down to its longest text. The tokenizer pads on
+    the right and the encoder ignores padded positions, so the model's outputs
+    are unchanged; only the work on padding is saved."""
+    longest = tf.reduce_max(tf.reduce_sum(tf.cast(x["attention_mask"], tf.int32), axis=1))
+    longest = tf.maximum(longest, 1)
+    return {k: v[:, :longest] for k, v in x.items()}, y
 
 
 # Label key holding each train row's position (load_splits(train_row_ids=True)).
@@ -218,6 +329,8 @@ def load_splits(
     train_row_ids: bool = False,
     train_label_share: Optional[Dict[str, float]] = None,
     repeat_train: int = 1,
+    embedding_source: Optional[Any] = None,
+    length_chunk_batches: int = 0,
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset, tf.data.Dataset]:
     """``drop_unlabeled_train`` removes train rows where every requested label
     is missing (they add no loss, only steps). Val/test keep every row so that
@@ -239,11 +352,25 @@ def load_splits(
     seeded by ``seed``, so for one seed a smaller share is a subset of a
     larger one, whatever else the run trains on. ``repeat_train`` > 1 repeats
     the train rows that many times (after ``drop_unlabeled_train``), so a run
-    on few rows takes as many steps per epoch as one on the full set."""
+    on few rows takes as many steps per epoch as one on the full set.
+    ``embedding_source`` (texts -> float32 [n, dim]) replaces tokenizing: the
+    model's input is then each row's pre-computed embedding (see
+    ``openai_embedding_source``). ``length_chunk_batches`` > 0 pads every
+    batch to its own longest text instead of to ``max_length``
+    (``trim_padding``): train batches group texts of similar length
+    (``length_grouped_batches``, chunks of that many batches, sources read
+    from the ``dataset`` column), val and test keep the CSV order."""
     multilabel_groups = multilabel_groups or {}
+    if length_chunk_batches:
+        if stratify_on or embedding_source is not None or (
+                encoder_config is not None
+                and encoder_config.encoder_input_type != EncoderInputType.HUGGINGFACE_TOKENS):
+            raise ValueError("length_chunk_batches needs a HuggingFace token encoder and "
+                             "can't be combined with stratify_on")
     label_column_map = label_column_map or {}
     encoder_config = encoder_config or ENCODER_CONFIGS["distilbert"]
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, use_fast=False)
+    tokenizer = (None if embedding_source is not None
+                 else AutoTokenizer.from_pretrained(tokenizer_name, use_fast=False))
 
     def _to_float(s: pd.Series) -> np.ndarray:
         s = s.replace(list(na_strings), np.nan)
@@ -309,15 +436,22 @@ def load_splits(
             labels[ROW_ID_KEY] = np.arange(len(df), dtype=np.int32)
 
         texts = ["" if pd.isna(x) else str(x) for x in df[text_column]]
-        enc = tokenizer(
-            texts,
-            padding="max_length",
-            truncation=True,
-            max_length=max_length,
-            return_tensors="np",
-        )
+        if embedding_source is not None:
+            inputs = np.asarray(embedding_source(texts), dtype=np.float32)
+            print(f"{split}: {inputs.shape[0]:,} pre-computed embeddings of "
+                  f"{inputs.shape[1]:,} numbers", flush=True)
+        else:
+            enc = tokenizer(
+                texts,
+                padding="max_length",
+                truncation=True,
+                max_length=max_length,
+                return_tensors="np",
+            )
 
-        if encoder_config.encoder_input_type == EncoderInputType.TFHUB_TOKENS:
+        if embedding_source is not None:
+            pass
+        elif encoder_config.encoder_input_type == EncoderInputType.TFHUB_TOKENS:
             input_type_ids = (
                 enc["token_type_ids"].astype(np.int32)
                 if "token_type_ids" in enc
@@ -360,12 +494,42 @@ def load_splits(
             return ds.apply(tf.data.experimental.assert_cardinality(
                 int(np.ceil(len(df) / batch_size)))).prefetch(tf.data.AUTOTUNE)
 
+        if split == "train" and length_chunk_batches:
+            lengths = inputs["attention_mask"].sum(axis=1)
+            sources = (pd.factorize(df["dataset"])[0] if "dataset" in df
+                       else np.zeros(len(df), dtype=np.int64))
+            padded = len(df) * inputs["input_ids"].shape[1]
+            rng = np.random.default_rng(seed)
+            first = length_grouped_batches(lengths, sources, batch_size, length_chunk_batches,
+                                           np.random.default_rng(seed))
+            used = sum(int(lengths[b].max()) * len(b) for b in first)
+            print(f"train: batches of similar length (chunks of {length_chunk_batches} batches, "
+                  f"{int(sources.max()) + 1} sources): {100 * used / padded:.1f}% of the "
+                  f"token positions of padding to {inputs['input_ids'].shape[1]}", flush=True)
+
+            def grouped():
+                for idx in length_grouped_batches(lengths, sources, batch_size,
+                                                  length_chunk_batches, rng):
+                    longest = max(int(lengths[idx].max()), 1)
+                    yield ({k: v[idx, :longest] for k, v in inputs.items()},
+                           {k: v[idx] for k, v in labels.items()})
+
+            ds = tf.data.Dataset.from_generator(grouped, output_signature=(
+                {k: tf.TensorSpec((None, None), v.dtype) for k, v in inputs.items()},
+                {k: tf.TensorSpec((None, *v.shape[1:]), v.dtype) for k, v in labels.items()}))
+            # The Trainer sizes the warmup from the dataset's length.
+            return ds.apply(tf.data.experimental.assert_cardinality(
+                int(np.ceil(len(df) / batch_size)))).prefetch(tf.data.AUTOTUNE)
+
         ds = tf.data.Dataset.from_tensor_slices((inputs, labels))
         if split == "train":
             # Full-length buffer: the train CSV is sorted by source corpus, so a
             # short buffer yields single-corpus batches for a whole third of an epoch.
             ds = ds.shuffle(len(df), seed=seed, reshuffle_each_iteration=True)
-        return ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+        ds = ds.batch(batch_size)
+        if length_chunk_batches:
+            ds = ds.map(trim_padding, num_parallel_calls=tf.data.AUTOTUNE)
+        return ds.prefetch(tf.data.AUTOTUNE)
 
     return build("train"), build("val"), build("test")
 
@@ -455,6 +619,132 @@ def binary_kl(t, p, eps=1e-7):
             + (1.0 - t) * (tf.math.log(1.0 - tc) - tf.math.log(1.0 - p)))
 
 
+class LayerwiseAdamW(tf.keras.optimizers.AdamW):
+    """AdamW whose step differs per variable: the learning rate, and with it
+    the decoupled weight decay (lr x decay x weight), is multiplied by
+    ``lr_multiplier(variable)``. Adam's moment estimates don't depend on the
+    learning rate, so a variable with multiplier m moves exactly m times as far
+    as it would under plain AdamW from the same state.
+
+    Keras builds each variable's update separately, reading ``learning_rate``
+    while it does; the multiplier is switched in for the length of that
+    variable's update."""
+
+    _lr_scale = 1.0
+
+    def __init__(self, *args, lr_multiplier=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._lr_multiplier = lr_multiplier or (lambda variable: 1.0)
+
+    @property
+    def learning_rate(self):
+        lr = tf.keras.optimizers.AdamW.learning_rate.fget(self)
+        return lr if self._lr_scale == 1.0 else lr * self._lr_scale
+
+    @learning_rate.setter
+    def learning_rate(self, value):
+        tf.keras.optimizers.AdamW.learning_rate.fset(self, value)
+
+    def update_step(self, gradient, variable):
+        self._lr_scale = float(self._lr_multiplier(variable))
+        try:
+            return super().update_step(gradient, variable)
+        finally:
+            self._lr_scale = 1.0
+
+    def _apply_weight_decay(self, variables):
+        # As tf_keras's Optimizer._apply_weight_decay, with the variable's rate.
+        if self.weight_decay is None:
+            return
+
+        def distributed_apply_weight_decay(distribution, variables, **kwargs):
+            def weight_decay_fn(variable):
+                if self._use_weight_decay(variable):
+                    lr = tf.cast(self.learning_rate, variable.dtype) * float(
+                        self._lr_multiplier(variable))
+                    wd = tf.cast(self.weight_decay, variable.dtype)
+                    variable.assign_sub(variable * wd * lr)
+
+            for variable in variables:
+                distribution.extended.update(variable, weight_decay_fn, group=False)
+
+        tf.__internal__.distribute.interim.maybe_merge_call(
+            distributed_apply_weight_decay, self._distribution_strategy, variables)
+
+
+# Variables left out of weight decay by --no-decay-bias-norm (regular
+# expressions searched in the variable name): biases and LayerNorm scales and
+# shifts, as in BERT's and ELECTRA's own fine-tuning code.
+NO_DECAY_NAMES = (r"/bias", r"LayerNorm", r"layer_norm")
+
+
+def layerwise_lr_groups(model, decay: float) -> Dict[int, Tuple[str, float]]:
+    """{variable id: (group, learning-rate multiplier)} for every trainable
+    variable of ``model``, following ELECTRA's layer-wise learning-rate decay
+    (Clark et al., 2020; ``_get_layer_lrs`` in its finetune/optimization.py).
+    With L encoder layers: the task layers (everything outside the encoder)
+    train at the full rate, encoder layer i (0 = bottom) at decay^(L + 1 - i),
+    the embeddings at decay^(L + 2). Any other encoder variable (BERT's
+    pooler) sits just above the top layer, at decay^1."""
+    encoder = model.encoder
+    num_layers = int(encoder.config.num_hidden_layers)
+    encoder_ids = {v._unique_id for v in encoder.trainable_variables}
+    groups: Dict[int, Tuple[str, float]] = {}
+    for v in model.trainable_variables:
+        if v._unique_id not in encoder_ids:
+            groups[v._unique_id] = ("task layers", 1.0)
+            continue
+        layer = re.search(r"/layer_\._(\d+)/", v.name)
+        if layer:
+            i = int(layer.group(1))
+            if i >= num_layers:
+                raise ValueError(f"{v.name}: layer {i} of a {num_layers}-layer encoder")
+            groups[v._unique_id] = (f"encoder layer {i}", decay ** (num_layers + 1 - i))
+        elif "/embeddings" in v.name:
+            groups[v._unique_id] = ("embeddings", decay ** (num_layers + 2))
+        elif "/encoder/" in v.name:
+            raise ValueError(f"Can't place encoder variable {v.name} in a layer")
+        else:
+            groups[v._unique_id] = ("encoder, above the layers", decay)
+    found = {g for g, _ in groups.values() if g.startswith("encoder layer")}
+    if len(found) != num_layers:
+        raise ValueError(f"Found variables for {len(found)} of {num_layers} encoder layers")
+    return groups
+
+
+def build_finetune_optimizer(model, learning_rate, weight_decay: float, *,
+                             layer_lr_decay: float = 1.0, clipnorm: float = 0.0,
+                             decay_bias_norm: bool = True) -> LayerwiseAdamW:
+    """AdamW with the optional fine-tuning practices of --layer-lr-decay,
+    --clipnorm and --no-decay-bias-norm. The per-variable rates are worked out
+    at the first training step, when every model variable exists."""
+    if not 0 < layer_lr_decay <= 1:
+        raise ValueError("layer_lr_decay must be in (0, 1]")
+    groups: Dict[int, Tuple[str, float]] = {}
+
+    def multiplier(variable) -> float:
+        if layer_lr_decay == 1.0:
+            return 1.0
+        if not groups:
+            groups.update(layerwise_lr_groups(model, layer_lr_decay))
+            count: Dict[Tuple[str, float], int] = {}
+            for key in groups.values():
+                count[key] = count.get(key, 0) + 1
+            print(f"Layer-wise learning rates (decay {layer_lr_decay:g}):")
+            for (group, m), n in sorted(count.items(), key=lambda kv: kv[0][1]):
+                print(f"  x{m:.4f}  {group} ({n} variables)", flush=True)
+        return groups[variable._unique_id][1]
+
+    optimizer = LayerwiseAdamW(learning_rate=learning_rate, weight_decay=weight_decay,
+                               global_clipnorm=clipnorm or None, lr_multiplier=multiplier)
+    if not decay_bias_norm:
+        optimizer.exclude_from_weight_decay(var_names=list(NO_DECAY_NAMES))
+    print(f"Optimizer: AdamW, layer-wise lr decay {layer_lr_decay:g}, global gradient clip "
+          f"{clipnorm or 'off'}, weight decay on biases and LayerNorm "
+          f"{'on' if decay_bias_norm else 'off'}", flush=True)
+    return optimizer
+
+
 class PooledOutputLossTrainer(Trainer):
     """Trainer whose loss sees a pooled output instead of its constituent heads.
 
@@ -494,8 +784,11 @@ class PooledOutputLossTrainer(Trainer):
                  task_loss_options: Optional[Dict[str, Tuple[float, float]]] = None,
                  pool_strategy: str = "max", technique_loss_weight: float = 0.0,
                  technique_class_weights: Optional[Sequence[Dict[int, float]]] = None,
+                 finetune: Optional[Dict[str, Any]] = None,
                  **kwargs):
         super().__init__(*args, **kwargs)
+        # Keyword arguments of build_finetune_optimizer; None = the library's optimizer.
+        self.finetune = dict(finetune) if finetune else None
         self.pooled_tasks = list(pooled_tasks)
         self.pooled_class_weights = pooled_class_weights
         self.task_loss_options = task_loss_options or {}
@@ -511,6 +804,15 @@ class PooledOutputLossTrainer(Trainer):
         self.technique_class_weights = (
             [(float(w.get(0, 1.0)), float(w.get(1, 1.0))) for w in technique_class_weights]
             if technique_class_weights is not None else None)
+
+    def _build_optimizer(self, steps_per_epoch):
+        if not self.finetune:
+            return super()._build_optimizer(steps_per_epoch)
+        if self.config.optimizer_type.lower() != "adamw":
+            raise ValueError("The fine-tuning optimizer options need optimizer_type 'adamw'")
+        return build_finetune_optimizer(
+            self.model, self._build_lr_schedule(steps_per_epoch),
+            self.config.weight_decay_rate, **self.finetune)
 
     def _build_loss_function(self, num_tasks, class_weights, task_weights,
                              task_type_mapping=None, mask_value=None):
@@ -902,6 +1204,19 @@ def load_pretrained_mlm_head(model_name: str, from_pt: bool) -> MLMHead:
     return head
 
 
+class NoMLMHead:
+    """Stands in for the masked-word head on an encoder whose checkpoint has
+    none (ELECTRA's discriminator). Only for ``mlm_lambda`` 0, where the
+    masked-word loss has no weight anyway: masking still works (it only needs
+    the vocabulary size), and the masked-word loss and accuracy are logged
+    as 0."""
+
+    trainable_variables: Tuple = ()
+
+    def __init__(self, vocab_size: int):
+        self.vocab_size = vocab_size
+
+
 class MaskedLMMultiTaskModel(MultiTaskModel):
     """MultiTaskModel trained on supervised loss + ``mlm_lambda`` x masked-word
     loss. The masked-word pass runs the encoder a second time on a masked copy
@@ -931,6 +1246,8 @@ class MaskedLMMultiTaskModel(MultiTaskModel):
 
     def mlm_loss_from_hidden(self, hidden, answers):
         """``mlm_loss`` for encoder outputs already computed on the masked ids."""
+        if isinstance(self.mlm_head, NoMLMHead):
+            return tf.constant(0.0), tf.constant(0.0)
         # Score only the picked positions: the full [B, L, vocab] tensor is huge.
         picked = tf.not_equal(answers, MLM_IGNORE)
         logits = self.mlm_head(tf.boolean_mask(hidden, picked),
@@ -985,10 +1302,19 @@ class MaskedLMTrainer(PooledOutputLossTrainer):
         """Create all variables, then attach the pretrained head."""
         self.model(next(iter(train_dataset))[0], training=False)
         ecfg = self.model.encoder_config
-        head = load_pretrained_mlm_head(ecfg.encoder_identifier, ecfg.from_pt)
+        enc_cfg = self.model.encoder.config
+        if enc_cfg.model_type == "bert":
+            head = load_pretrained_mlm_head(ecfg.encoder_identifier, ecfg.from_pt)
+            source = f"pretrained head from {ecfg.encoder_identifier}"
+        elif self.mlm_lambda == 0:
+            head = NoMLMHead(enc_cfg.vocab_size)
+            source = f"no head ({enc_cfg.model_type} checkpoint has none; loss logged as 0)"
+        else:
+            raise ValueError(f"A masked-word loss with weight {self.mlm_lambda:g} needs a BERT "
+                             f"checkpoint with its pretrained head, not {enc_cfg.model_type}")
         self.model.attach_mlm_head(head, self.mlm_lambda, self.mask_prob)
         print(f"Masked-word loss: lambda={self.mlm_lambda:g}, mask prob={self.mask_prob:g}, "
-              f"pretrained head from {ecfg.encoder_identifier}")
+              f"{source}")
 
     def fit(self, train_dataset, *args, **kwargs):
         self.prepare(train_dataset)
@@ -1289,8 +1615,8 @@ class LabelAwareMaskedModel(ConsistencyMixin, BalancedMaskedLMModel):
                            training=training)
         mlm_loss, mlm_acc = self.mlm_loss_from_hidden(enc.last_hidden_state, answers)
         # Same choice as MultiTaskModel._encode_input for HuggingFace encoders.
-        rep = (enc.pooler_output if enc.pooler_output is not None
-               else enc.last_hidden_state[:, 0, :])
+        pooled = getattr(enc, "pooler_output", None)  # ELECTRA's output has no such field
+        rep = pooled if pooled is not None else enc.last_hidden_state[:, 0, :]
         return mlm_loss, mlm_acc, self.forward_from_encoding(rep, training=training)
 
     def label_aware_losses(self, x, y, clean, training, masking):
@@ -2085,12 +2411,26 @@ class EpochScorer(tf.keras.callbacks.Callback):
     instead of the mean, and training stops once that output's val F1 and
     AUC have both stalled ``patience`` epochs. Val loss plays no part then,
     since it sums every task. All outputs are still scored every epoch.
+
+    ``evals_per_epoch`` = k > 1 scores k times per epoch, at equal step
+    intervals (the last one at the epoch's end), so a best point between
+    epochs can be kept. A record's ``epoch`` is then a fraction (0.25, 0.5,
+    ...), ``patience`` counts scorings instead of epochs, and training can
+    stop in the middle of an epoch. ``val_loss`` is then worked out here at
+    every scoring, as the mean over the val batches of the model's loss.
+    (With one scoring per epoch it stays the number Keras logs, which for
+    this model is the loss of the last val batch only: see
+    test_finetune_recipe.py.)
     """
 
     def __init__(self, val_ds, test_ds, monitor: str = "f1", patience: int = 3,
                  outputs: Optional[Sequence[str]] = None,
-                 main_output: Optional[str] = None, stops: bool = True):
+                 main_output: Optional[str] = None, stops: bool = True,
+                 evals_per_epoch: int = 1):
         super().__init__()
+        if evals_per_epoch < 1:
+            raise ValueError("evals_per_epoch must be at least 1")
+        self.evals_per_epoch = int(evals_per_epoch)
         if monitor not in EARLY_STOP_METRICS:
             raise ValueError(f"monitor must be one of {EARLY_STOP_METRICS}, got {monitor!r}")
         if main_output and monitor == "loss":
@@ -2102,7 +2442,8 @@ class EpochScorer(tf.keras.callbacks.Callback):
         self.stops = stops  # False: another callback ends training (self-distillation)
         self.trainer = None
         self.records: List[Dict[str, Any]] = []
-        self.best_epoch = None
+        self.best_epoch = None   # the kept record's ``epoch``
+        self.best_index = None   # its 1-based position in ``records``
 
     def _scores(self, ds, thresholds):
         res = self.trainer.evaluate(ds, thresholds=thresholds)
@@ -2115,27 +2456,69 @@ class EpochScorer(tf.keras.callbacks.Callback):
         if self.trainer is None:
             raise RuntimeError("EpochScorer.trainer was never set")
         self.records, self.best_epoch, self._best_weights = [], None, None
+        self.best_index, self._epoch, self._stopped = None, 0, False
         names = list(self.model.task_names)
         labels = {k: [] for k in names}
+        self._val_batch_sizes = []
         for _, y in self.val_ds:
             for k in names:
                 labels[k].append(y[k].numpy())
+            self._val_batch_sizes.append(len(labels[names[0]][-1]))
         self._val_labels = {k: np.concatenate(v, axis=0) for k, v in labels.items()}
         self._val_labels.update(self.trainer._derive_pooled_labels(self._val_labels))
 
+    def on_epoch_begin(self, epoch, logs=None):
+        self._epoch = epoch
+
+    def on_train_batch_end(self, batch, logs=None):
+        """The in-between scorings of ``evals_per_epoch``; the epoch's last
+        one is ``on_epoch_end``."""
+        if self.evals_per_epoch == 1 or self._stopped:
+            return
+        steps = self.params.get("steps")
+        if not steps:
+            raise RuntimeError("evals_per_epoch needs a known number of steps per epoch")
+        k = self.evals_per_epoch
+        if batch + 1 in {round(j * steps / k) for j in range(1, k)} and batch + 1 < steps:
+            self._score(self._epoch + (batch + 1) / steps, None, None)
+
     def on_epoch_end(self, epoch, logs=None):
+        if self._stopped:  # stopped at an in-between scoring of this epoch
+            return
         logs = logs if logs is not None else {}
+        self._score(epoch + 1,
+                    float(logs["val_loss"]) if self.evals_per_epoch == 1 else None, logs)
+
+    def _val_loss(self, pred) -> float:
+        """Mean over the val batches of the model's loss, from predictions
+        already made."""
+        names = list(self.model.task_names)
+        losses, start = [], 0
+        for size in self._val_batch_sizes:
+            rows = slice(start, start + size)
+            y = {k: tf.constant(self._val_labels[k][rows], tf.float32) for k in names}
+            p = {k: tf.constant(np.asarray(pred[k])[rows], tf.float32) for k in names}
+            losses.append(float(self.model._mtl_loss_fn(y, p)))
+            start += size
+        return float(np.mean(losses))
+
+    def _score(self, epoch, val_loss, logs):
+        """Score val and test now and record it as ``epoch`` (a whole number
+        at an epoch's end, a fraction in between)."""
         pred = self.model.predict(self.val_ds, verbose=0)
         thresholds, _ = self.trainer._find_optimal_thresholds(self._val_labels, pred)
         val, test = self._scores(self.val_ds, thresholds), self._scores(self.test_ds, thresholds)
         for k, v in self._val_task_losses(pred).items():
             if k in val:
                 val[k]["loss"] = v
-        rec = {"epoch": epoch + 1, "val_loss": float(logs["val_loss"]), "val": val, "test": test}
+        if val_loss is None:
+            val_loss = self._val_loss(pred)
+        rec = {"epoch": epoch, "val_loss": float(val_loss), "val": val, "test": test}
         for m in ("f1", "auc"):
             rec[f"val_{m}"] = float(np.mean([s[m] for s in val.values()]))
             rec[f"test_{m}"] = float(np.mean([s[m] for s in test.values()]))
-            logs[f"val_{m}"] = rec[f"val_{m}"]
+            if logs is not None:
+                logs[f"val_{m}"] = rec[f"val_{m}"]
         if self.main_output:
             if self.main_output not in val:
                 raise ValueError(f"main_output {self.main_output!r} is not scored: {sorted(val)}")
@@ -2145,27 +2528,31 @@ class EpochScorer(tf.keras.callbacks.Callback):
         if getattr(self.model, "teacher", None) is not None:
             rec["teacher"] = self._teacher_scores()
         self.records.append(rec)
-        print(f"Epoch {epoch + 1}: val_loss {rec['val_loss']:.4f}  val F1 {100 * rec['val_f1']:.2f}  "
-              f"val AUC {100 * rec['val_auc']:.2f}", flush=True)
+        index = len(self.records)  # = the epoch number unless evals_per_epoch > 1
+        print(f"Epoch {epoch:g}: val_loss {rec['val_loss']:.4f}  val F1 {100 * rec['val_f1']:.2f}  "
+              f"val AUC {100 * rec['val_auc']:.2f}  (test F1 {100 * rec['test_f1']:.2f})",
+              flush=True)
         if self.main_output:
-            print(f"Epoch {epoch + 1}: main task {self.main_output} val F1 "
+            print(f"Epoch {epoch:g}: main task {self.main_output} val F1 "
                   f"{100 * rec['val_main_f1']:.2f}  val AUC {100 * rec['val_main_auc']:.2f}",
                   flush=True)
         if "teacher" in rec:
-            print(f"Epoch {epoch + 1}: EMA teacher val F1 {100 * rec['teacher']['val_f1']:.2f}  "
+            print(f"Epoch {epoch:g}: EMA teacher val F1 {100 * rec['teacher']['val_f1']:.2f}  "
                   f"val AUC {100 * rec['teacher']['val_auc']:.2f}", flush=True)
 
-        if self.best_epoch is None or self._better(rec, self.records[self.best_epoch - 1]):
-            self.best_epoch = epoch + 1
+        if self.best_index is None or self._better(rec, self.records[self.best_index - 1]):
+            self.best_index, self.best_epoch = index, epoch
             self._best_weights = self.model.get_weights()
         stop_metrics = ("f1", "auc") if self.main_output else EARLY_STOP_METRICS
-        stalled = all(epoch + 1 - self._best_by(m) >= self.patience for m in stop_metrics)
+        stalled = all(index - self._best_by(m) >= self.patience for m in stop_metrics)
         if stalled and self.stops:
             what = (f"main task {self.main_output} val F1 and AUC both" if self.main_output
                     else "val loss, F1 and AUC all")
-            print(f"Epoch {epoch + 1}: {what} stalled for "
-                  f"{self.patience} epochs, stopping", flush=True)
+            print(f"Epoch {epoch:g}: {what} stalled for {self.patience} "
+                  f"{'epochs' if self.evals_per_epoch == 1 else 'scorings'}, stopping",
+                  flush=True)
             self.model.stop_training = True
+            self._stopped = True
 
     def _teacher_scores(self):
         """The EMA teacher scored like the student (its own val thresholds),
@@ -2213,7 +2600,8 @@ class EpochScorer(tf.keras.callbacks.Callback):
         return a[key] > b[key]
 
     def _best_by(self, metric):
-        """Epoch (1-based) of the first best value of ``metric`` so far."""
+        """Position in ``records`` (1-based; the epoch number unless
+        ``evals_per_epoch`` > 1) of the first best value of ``metric`` so far."""
         key = self._key(metric)
         vals = [r[key] for r in self.records]
         return 1 + int(np.argmin(vals) if metric == "loss" else np.argmax(vals))
@@ -2221,8 +2609,8 @@ class EpochScorer(tf.keras.callbacks.Callback):
     def on_train_end(self, logs=None):
         if self._best_weights is not None:
             what = f"{self.main_output} " if self.main_output else ""
-            print(f"Restoring weights from epoch {self.best_epoch} (best val {what}{self.monitor})",
-                  flush=True)
+            print(f"Restoring weights from epoch {self.best_epoch:g} "
+                  f"(best val {what}{self.monitor})", flush=True)
             self.model.set_weights(self._best_weights)
 
 
@@ -2445,6 +2833,331 @@ class GradientProbe(tf.keras.callbacks.Callback):
 # ---------------------------------------------------------------------------
 # Shared train/eval harness
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Frozen stage 2: re-train each task's own block on the frozen shared part
+# ---------------------------------------------------------------------------
+# After stage 1 (any trainer here, with EpochScorer's best epoch restored) the
+# encoder, the shared layers and the task-type ("family") blocks are frozen.
+# Their outputs are computed once per text and cached, and only each task's
+# own block (model.branch_layers[1][i]) and output layer keep training, on the
+# real labels with stage 1's per-task loss and class weights. No balancer, no
+# consistency term, no masking. With the shared part frozen the tasks share
+# no trained weight, so each output can keep the epoch that is best for its
+# own val F1; stage 1's block counts as epoch 0. The result is one model.
+
+def table3_scores(trainer, labels, pred, thresholds, outputs):
+    """Weighted F1 at the given cut-offs and AUC for each output, from arrays,
+    computed as ``Trainer.evaluate`` does (labelled rows only; a pool's label
+    is "any constituent positive")."""
+    from sklearn.metrics import f1_score, roc_auc_score
+
+    mask_value = trainer.mask_value
+    scores = {}
+    for k in outputs:
+        y, p = np.asarray(labels[k]), np.asarray(pred[k])
+        p = p[:, 0] if p.ndim > 1 else p
+        valid = y != mask_value
+        valid = valid[:, 0] if valid.ndim > 1 else valid
+        y = y[valid]
+        y = y[:, 0] if y.ndim > 1 else y
+        if trainer.model.config.is_pool(k):
+            y = (y > 0).astype(int)
+        hard = (p > thresholds[k]).astype(int)[valid]
+        scores[k] = {
+            "f1": float(f1_score(y, hard, average="weighted", zero_division=0)),
+            "auc": float(roc_auc_score(y, p[valid])),
+        }
+    return scores
+
+
+class Stage2:
+    """The frozen stage 2 for one trained model. ``outputs`` are the scored
+    outputs (a task, or a pool standing for its constituent heads)."""
+
+    def __init__(self, trainer, outputs: Sequence[str], batch_size: int = 256,
+                 weight_decay: float = 0.01):
+        model = trainer.model
+        if len(model.branch_layers) != 2:
+            raise ValueError("stage 2 needs a family level and a task level of blocks")
+        if getattr(model, "_mtl_task_losses_fn", None) is None:
+            raise ValueError("stage 2 needs the pooled-loss trainers (--pooled-propaganda-loss)")
+        self.trainer, self.model = trainer, model
+        self.names = list(model.task_names)
+        self.outputs = list(outputs)
+        self.batch_size, self.weight_decay = batch_size, weight_decay
+        # family block that feeds each task block
+        self.parent = [f for f, n in enumerate(model.config.task_structure[1]) for _ in range(n)]
+        self.task_vars: Dict[str, List[tf.Variable]] = {}
+        for k in self.outputs:
+            tasks = model.config.get_pool_config(k)["tasks"] if model.config.is_pool(k) else [k]
+            variables = []
+            for t in tasks:
+                for layer in model.branch_layers[1][self.names.index(t)]:
+                    variables += layer.variables
+                variables += model.output_layers[t].variables
+            self.task_vars[k] = variables
+        self.frozen_layers = ([model.encoder] if model.uses_encoder else []) + \
+            list(model.shared_layers) + [l for branch in model.branch_layers[0] for l in branch]
+        self.frozen_vars = [v for layer in self.frozen_layers for v in layer.variables]
+        # reduce_retracing: batches padded to their own longest text come in many
+        # widths; without it the encoder would be traced once per width.
+        self._features_fn = tf.function(self._features, reduce_retracing=True)
+        self._full = None  # (val_ds, val labels, test_ds, test labels): see use_full_model
+        self._heads_fn = tf.function(lambda feats: self.heads(feats, training=False))
+
+    def freeze(self):
+        for layer in self.frozen_layers:
+            layer.trainable = False
+
+    def frozen_weights(self) -> List[np.ndarray]:
+        return [v.numpy() for v in self.frozen_vars]
+
+    def _features(self, x):
+        h = self.model._encode_input(x, training=False)
+        for layer in self.model.shared_layers:
+            h = layer(h, training=False)
+        feats = []
+        for branch in self.model.branch_layers[0]:
+            z = h
+            for layer in branch:
+                z = layer(z, training=False)
+            feats.append(z)
+        return feats
+
+    def heads(self, feats, training=False):
+        """Every task block and output layer on the cached family outputs,
+        plus the pooled outputs: what the full model returns."""
+        out = {}
+        for i, name in enumerate(self.names):
+            z = feats[self.parent[i]]
+            for layer in self.model.branch_layers[1][i]:
+                z = layer(z, training=training)
+            out[name] = self.model.output_layers[name](z, training=training)
+        out.update(self.model._compute_pooled_outputs(out))
+        return out
+
+    def cache(self, ds):
+        """One pass over ``ds``: (family outputs, one array per family; labels,
+        pooled labels included). Rows come in the order ``ds`` yields them."""
+        feats = [[] for _ in self.model.branch_layers[0]]
+        labels = {k: [] for k in self.names}
+        for x, y in ds:
+            for acc, f in zip(feats, self._features_fn(x)):
+                acc.append(f.numpy())
+            for k in self.names:
+                labels[k].append(y[k].numpy())
+        labels = {k: np.concatenate(v, axis=0) for k, v in labels.items()}
+        labels.update(self.trainer._derive_pooled_labels(labels))
+        return [np.concatenate(f, axis=0) for f in feats], labels
+
+    def predict(self, feats, batch: int = 8192):
+        parts: Dict[str, list] = {}
+        for s in range(0, len(feats[0]), batch):
+            out = self._heads_fn([tf.constant(f[s:s + batch]) for f in feats])
+            for k, v in out.items():
+                parts.setdefault(k, []).append(v.numpy())
+        return {k: np.concatenate(v, axis=0) for k, v in parts.items()}
+
+    def _labels(self, ds):
+        labels = {k: [] for k in self.names}
+        for _, y in ds:
+            for k in self.names:
+                labels[k].append(y[k].numpy())
+        labels = {k: np.concatenate(v, axis=0) for k, v in labels.items()}
+        labels.update(self.trainer._derive_pooled_labels(labels))
+        return labels
+
+    def use_full_model(self, val_ds, test_ds):
+        """Score val and test through the whole network (``model.predict``,
+        as EpochScorer does) instead of through cached features. On a GPU the
+        two paths differ by ~1e-3 in a score, which is enough to move a J
+        cut-off and the F1 at it; this way epoch 0 is exactly stage 1 and the
+        assembled model scores exactly as each output's chosen epoch did.
+        The cache is then only used to train."""
+        self._full = (val_ds, self._labels(val_ds), test_ds, self._labels(test_ds))
+
+    def score(self, val=None, test=None):
+        """(val scores, test scores, cut-offs): the J cut-offs are tuned on val
+        and used on both, as EpochScorer does. ``val`` / ``test`` are caches,
+        ignored after ``use_full_model``."""
+        if self._full is not None:
+            val_ds, val_labels, test_ds, test_labels = self._full
+            val_pred = self.model.predict(val_ds, verbose=0)
+            test_pred = self.model.predict(test_ds, verbose=0)
+        else:
+            (val_feats, val_labels), (test_feats, test_labels) = val, test
+            val_pred, test_pred = self.predict(val_feats), self.predict(test_feats)
+        thresholds, _ = self.trainer._find_optimal_thresholds(val_labels, val_pred)
+        return (table3_scores(self.trainer, val_labels, val_pred, thresholds, self.outputs),
+                table3_scores(self.trainer, test_labels, test_pred, thresholds, self.outputs),
+                thresholds)
+
+    def get_blocks(self):
+        return {k: [v.numpy() for v in vs] for k, vs in self.task_vars.items()}
+
+    def set_blocks(self, blocks):
+        for k, weights in blocks.items():
+            for v, w in zip(self.task_vars[k], weights):
+                v.assign(w)
+
+    def fit(self, train, val=None, test=None, *, lr: float, epochs: int, seed: Optional[int] = None,
+            only: Optional[Sequence[str]] = None):
+        """Trains the task blocks (those of ``only``, default every output)
+        from their current weights, keeps each output's own val-F1-best epoch
+        (epoch 0 = the weights it started with; a later epoch must be strictly
+        better) and leaves the model holding that assembly."""
+        import time
+
+        feats, labels = train
+        n = len(feats[0])
+        train_outputs = list(only) if only is not None else self.outputs
+        variables = [v for k in train_outputs for v in self.task_vars[k]]
+        optimizer = tf.keras.optimizers.AdamW(learning_rate=lr, weight_decay=self.weight_decay)
+        optimizer.build(variables)
+        loss_fn = self.model._mtl_task_losses_fn
+        F = [tf.constant(f) for f in feats]
+        Y = {k: tf.constant(labels[k]) for k in self.names}
+
+        @tf.function
+        def step(idx):
+            with tf.GradientTape() as tape:
+                pred = self.heads([tf.gather(f, idx) for f in F], training=True)
+                losses, has = loss_fn({k: tf.gather(Y[k], idx) for k in self.names},
+                                      {k: pred[k] for k in self.names})
+                loss = tf.reduce_sum(losses * has)
+            optimizer.apply_gradients(zip(tape.gradient(loss, variables), variables))
+            return loss
+
+        def record(epoch, v, t, seconds):
+            rec = {"epoch": epoch, "val": v, "test": t, "seconds": seconds}
+            for m in ("f1", "auc"):
+                rec[f"val_{m}"] = float(np.mean([s[m] for s in v.values()]))
+                rec[f"test_{m}"] = float(np.mean([s[m] for s in t.values()]))
+            return rec
+
+        v, t, _ = self.score(val, test)
+        records = [record(0, v, t, 0.0)]
+        best_f1 = {k: v[k]["f1"] for k in self.outputs}
+        best_epoch = {k: 0 for k in self.outputs}
+        best_blocks = self.get_blocks()
+        rng = np.random.default_rng(seed)
+        for epoch in range(1, epochs + 1):
+            start = time.time()
+            order = rng.permutation(n).astype(np.int32)
+            for s in range(0, n, self.batch_size):
+                step(tf.constant(order[s:s + self.batch_size]))
+            seconds = time.time() - start
+            v, t, _ = self.score(val, test)
+            records.append(record(epoch, v, t, seconds))
+            for k in train_outputs:
+                if v[k]["f1"] > best_f1[k]:
+                    best_f1[k], best_epoch[k] = v[k]["f1"], epoch
+                    best_blocks[k] = [w.numpy() for w in self.task_vars[k]]
+            print(f"Stage 2 lr {lr:g} epoch {epoch}: val F1 {100 * records[-1]['val_f1']:.2f}  "
+                  f"val AUC {100 * records[-1]['val_auc']:.2f}  ({seconds:.1f}s train)", flush=True)
+        self.set_blocks(best_blocks)
+        return {"lr": lr, "epochs": records, "chosen_epoch": best_epoch}
+
+    def full_model_scores(self, val_ds, test_ds):
+        """The model as it stands, scored by the library through the whole
+        network: J cut-offs re-tuned on val, test scored once with them."""
+        val_labels = self._labels(val_ds)
+        pred = self.model.predict(val_ds, verbose=0)
+        thresholds, _ = self.trainer._find_optimal_thresholds(val_labels, pred)
+        out = {"thresholds": {k: thresholds[k] for k in self.outputs}}
+        raw = {}
+        for split, ds in (("val", val_ds), ("test", test_ds)):
+            res = self.trainer.evaluate(ds, thresholds=thresholds)
+            merged = {**res.get("task_metrics", {}), **res.get("pool_metrics", {})}
+            out[split] = {k: {"f1": float(merged[k]["f1"]), "auc": float(merged[k]["auc"])}
+                          for k in self.outputs}
+            for m in ("f1", "auc"):
+                out[f"{split}_{m}"] = float(np.mean([s[m] for s in out[split].values()]))
+            raw[split] = res
+        return out, raw
+
+
+def run_stage2(trainer, train_ds, val_ds, test_ds, *, lrs: Sequence[str], epochs: int,
+               outputs: Sequence[str], batch_size: int = 256, weight_decay: float = 0.01,
+               seed: Optional[int] = None, predictions_prefix: Optional[str] = None,
+               weights_path: Optional[str] = None) -> Dict[str, Any]:
+    """Stage 2 at each learning rate in ``lrs`` (strings, kept as the result
+    keys), all from the same stage-1 model and the same cache: the task blocks
+    are put back to stage 1 after each rate. Writes one predictions file per
+    rate (``<predictions_prefix>_stage2_lr<lr>_predictions.npz``) and, if
+    ``weights_path`` is given, the stage-1 weights (``model.variables`` order
+    before freezing, with their names)."""
+    import time
+
+    model = trainer.model
+    if weights_path:
+        os.makedirs(os.path.dirname(weights_path) or ".", exist_ok=True)
+        np.savez_compressed(
+            weights_path, names=np.array([v.name for v in model.variables]),
+            **{f"w{i}": v.numpy() for i, v in enumerate(model.variables)})
+        print(f"Wrote {weights_path} ({len(model.variables)} variables)")
+    s2 = Stage2(trainer, outputs, batch_size=batch_size, weight_decay=weight_decay)
+    s2.freeze()
+    frozen_before = s2.frozen_weights()
+    # every variable stage 2 may not train (frozen part, and the blocks of
+    # outputs not in ``outputs``, e.g. a hidden one)
+    trained_ids = {id(v) for vs in s2.task_vars.values() for v in vs}
+    untrained = [v for v in model.variables if id(v) not in trained_ids]
+    untrained_before = [v.numpy() for v in untrained]
+    start = time.time()
+    train = s2.cache(train_ds)
+    cache_seconds = time.time() - start
+    full_val = model.predict(val_ds, verbose=0)
+    cached_val = s2.predict(s2.cache(val_ds)[0])
+    s2.use_full_model(val_ds, test_ds)
+    cache_gap = max(float(np.max(np.abs(np.asarray(full_val[k]) - cached_val[k])))
+                    for k in cached_val)
+    print(f"Stage 2 cache: {len(train[0][0]):,} train rows in {cache_seconds:.0f}s; largest gap "
+          f"between cached and full-model val scores {cache_gap:.2e}", flush=True)
+    stage1_blocks = s2.get_blocks()
+    stage1, _ = s2.full_model_scores(val_ds, test_ds)
+    out: Dict[str, Any] = {
+        "outputs": list(outputs), "stage2_epochs": epochs, "batch_size": batch_size,
+        "weight_decay": weight_decay, "cache_seconds": cache_seconds,
+        "cache_rows": {"train": len(train[0][0])},
+        "cache_max_abs_gap": cache_gap, "stage1": stage1, "stage1_weights": weights_path,
+        "runs": {},
+    }
+    for lr in lrs:
+        run = s2.fit(train, lr=float(lr), epochs=epochs, seed=seed)
+        run["assembled"], raw = s2.full_model_scores(val_ds, test_ds)
+        # each output of the assembled model against its chosen epoch's record
+        run["assembly_max_f1_gap"] = max(
+            abs(run["assembled"][split][k]["f1"]
+                - run["epochs"][run["chosen_epoch"][k]][split][k]["f1"])
+            for split in ("val", "test") for k in outputs)
+        if predictions_prefix:
+            arrays = {}
+            for split, res in raw.items():
+                for name, prob in (res.get("probabilities_dict") or {}).items():
+                    arrays[f"{split}/prob/{name}"] = np.asarray(prob, dtype=np.float32)
+                for name, label in (res.get("labels_dict") or {}).items():
+                    arrays[f"{split}/label/{name}"] = np.asarray(label, dtype=np.float32)
+            path = f"{predictions_prefix}_stage2_lr{lr}_predictions.npz"
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            np.savez_compressed(path, **arrays)
+            run["predictions"] = os.path.basename(path)
+            print(f"Wrote {path} ({len(arrays)} arrays)")
+        a = run["assembled"]
+        print(f"Stage 2 lr {lr}: assembled val F1 {100 * a['val_f1']:.2f} test F1 "
+              f"{100 * a['test_f1']:.2f}  (stage 1: {100 * stage1['val_f1']:.2f} / "
+              f"{100 * stage1['test_f1']:.2f}); chosen epochs {run['chosen_epoch']}", flush=True)
+        out["runs"][lr] = run
+        s2.set_blocks(stage1_blocks)
+    out["frozen_unchanged"] = all(
+        np.array_equal(a, b) for a, b in zip(frozen_before, s2.frozen_weights()))
+    out["untrained_unchanged"] = all(
+        np.array_equal(a, v.numpy()) for a, v in zip(untrained_before, untrained))
+    print(f"Stage 2: frozen weights unchanged: {out['frozen_unchanged']}; every variable "
+          f"outside the trained blocks unchanged: {out['untrained_unchanged']}", flush=True)
+    return out
+
 
 def run_experiment(
     config: ModelConfig,
@@ -3089,14 +3802,47 @@ def run_paper_replication(args: argparse.Namespace) -> None:
                              "and a share in (0, 1]")
         if float(share) < 1:
             label_share[col] = float(share)
+    if args.length_chunk_batches < 0 or args.evals_per_epoch < 1:
+        raise SystemExit("--length-chunk-batches must be >= 0 and --evals-per-epoch >= 1")
+    if args.length_chunk_batches and (args.stratify_batches
+                                      or args.encoder in OPENAI_EMBEDDING_MODELS):
+        raise SystemExit("--length-chunk-batches can't be combined with --stratify-batches "
+                         "or stored embeddings")
+    if args.evals_per_epoch > 1 and (not args.early_stop_metric or args.self_distill):
+        raise SystemExit("--evals-per-epoch needs --early-stop-metric and can't be combined "
+                         "with --self-distill (which switches tasks at epoch ends)")
+    if not 0 < args.layer_lr_decay <= 1 or args.clipnorm < 0:
+        raise SystemExit("--layer-lr-decay must be in (0, 1] and --clipnorm >= 0")
+    finetune = None
+    if args.layer_lr_decay != 1.0 or args.clipnorm or args.no_decay_bias_norm:
+        if not args.pooled_propaganda_loss:
+            raise SystemExit("--layer-lr-decay / --clipnorm / --no-decay-bias-norm need "
+                             "--pooled-propaganda-loss")
+        if args.layer_lr_decay != 1.0 and args.encoder in OPENAI_EMBEDDING_MODELS:
+            raise SystemExit("--layer-lr-decay needs an encoder that is trained")
+        finetune = dict(layer_lr_decay=args.layer_lr_decay, clipnorm=args.clipnorm,
+                        decay_bias_norm=not args.no_decay_bias_norm)
     if args.repeat_train > 1 and (args.self_distill or args.stratify_batches):
         raise SystemExit("--repeat-train can't be combined with --self-distill / "
                          "--stratify-batches")
     stratify_on = ([propaganda_task_names] if propaganda_task_names else []) + \
         [[t] for t in wa_task_names + discourse_task_names]
+    embedding_source = None
+    if args.encoder in OPENAI_EMBEDDING_MODELS:
+        # There are no tokens and no encoder in the model, so everything that
+        # masks words, reads the encoder or re-tokenizes the CSVs is out.
+        if (args.mlm_lambda is not None or args.masked_label_weight or args.mask_sweep
+                or (args.consistency_weight and not args.consistency_teacher)
+                or args.probe_tasks or args.probe_untrained):
+            raise SystemExit(f"--encoder {args.encoder} trains on stored embeddings: it can't "
+                             "be combined with --mlm-lambda, --masked-label-weight, "
+                             "--consistency-weight on masked copies, --mask-sweep or "
+                             "--probe-tasks")
+        embedding_source = openai_embedding_source(args.encoder, args.embedding_cache)
     train_ds, val_ds, test_ds = load_splits(
         label_columns=all_task_names,
         encoder_config=encoder_config,
+        embedding_source=embedding_source,
         batch_size=args.batch_size,
         data_dir=args.data_dir,
         label_column_map=PROPAGANDA_BINARY_LABEL_MAP,
@@ -3111,6 +3857,7 @@ def run_paper_replication(args: argparse.Namespace) -> None:
         train_row_ids=args.self_distill,
         train_label_share=label_share,
         repeat_train=args.repeat_train,
+        length_chunk_batches=args.length_chunk_batches,
     )
     task_types = ["binary"] * len(all_task_names)
     num_classes_per_task = [2] * len(all_task_names)
@@ -3292,7 +4039,8 @@ def run_paper_replication(args: argparse.Namespace) -> None:
                       pool_strategy=args.propaganda_pool,
                       technique_loss_weight=args.technique_loss_weight,
                       technique_class_weights=[class_weights[all_task_names.index(t)]
-                                               for t in propaganda_task_names])
+                                               for t in propaganda_task_names],
+                      finetune=finetune)
             # Propaganda rows carry rule-made IAC labels, so they are kept
             # out of the IAC heads' confident targets.
             skip = {t: propaganda_task_names for t in discourse_task_names}
@@ -3366,6 +4114,7 @@ def run_paper_replication(args: argparse.Namespace) -> None:
                              patience=args.early_stop_patience,
                              main_output=args.main_task or None,
                              stops=not args.self_distill,
+                             evals_per_epoch=args.evals_per_epoch,
                              outputs=scored_outputs
                              if args.hide_task or args.self_distill else None)
         callbacks.append(scorer)
@@ -3379,6 +4128,12 @@ def run_paper_replication(args: argparse.Namespace) -> None:
         def trainer_factory(model, cfg):
             scorer.trainer = build_trainer(model, cfg)
             return scorer.trainer
+    # With --hide-task, stage 2 trains and picks epochs for the scored outputs
+    # only, so the hidden output's block is never trained and its val labels
+    # are never read (run_stage2 records `untrained_unchanged`).
+    if args.stage2 and (not args.early_stop_metric or args.self_distill):
+        raise SystemExit("--stage2 needs --early-stop-metric (stage 1 = its best epoch) and "
+                         "can't be combined with --self-distill")
     if args.main_task and args.early_stop_metric not in ("f1", "auc"):
         raise SystemExit("--main-task needs --early-stop-metric f1 or auc")
     if args.mask_sweep and not args.early_stop_metric:
@@ -3456,6 +4211,16 @@ def run_paper_replication(args: argparse.Namespace) -> None:
             "patience": args.self_distill_patience,
             "signal": args.self_distill_signal,
             "switches": next(c for c in callbacks if isinstance(c, SelfDistillCallback)).switches}
+    if args.stage2:
+        prefix = os.path.splitext(args.results_json)[0] if args.results_json else None
+        results["stage2"] = run_stage2(
+            scorer.trainer, train_ds, val_ds, test_ds,
+            lrs=[lr for lr in args.stage2_lrs.split(",") if lr], epochs=args.stage2_epochs,
+            outputs=scored_outputs, batch_size=args.stage2_batch_size or args.batch_size,
+            weight_decay=training_config.weight_decay_rate, seed=args.seed,
+            predictions_prefix=prefix if args.save_predictions else None,
+            weights_path=f"{prefix}_stage1_weights.npz"
+            if prefix and args.stage2_save_weights else None)
     if args.mask_sweep:
         results["mask_sweep"] = mask_sweep(
             scorer, [float(r) for r in args.mask_sweep.split(",")],
@@ -3596,6 +4361,7 @@ def report_paper_comparison(results: Dict[str, Any], args: argparse.Namespace) -
             "best_epoch": results.get("best_epoch"),
             "main_task": results.get("main_task"),
             "self_distill": results.get("self_distill"),
+            "stage2": results.get("stage2"),
             "mask_sweep": results.get("mask_sweep"),
             "probes": results.get("probes"),
         }
@@ -3721,6 +4487,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-length", type=int, default=96,
         help="Tokenizer max sequence length (paper_replication only; paper config uses 512)",
+    )
+    parser.add_argument(
+        "--embedding-cache", default="/cache/openai_embeddings",
+        help="paper_replication with --encoder openai-*: directory of the stored embeddings "
+             "(filled by `modal run modal_embed.py::embed`)",
     )
     parser.add_argument("--seed", type=int, default=None, help="Global random seed")
     parser.add_argument(
@@ -3967,6 +4738,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="Patience for --early-stop-metric",
     )
     parser.add_argument(
+        "--evals-per-epoch", type=int, default=1,
+        help="paper_replication only, with --early-stop-metric: score val and test "
+             "this many times per epoch, at equal step intervals, and pick the best "
+             "scoring instead of the best epoch; --early-stop-patience then counts "
+             "scorings",
+    )
+    parser.add_argument(
+        "--length-chunk-batches", type=int, default=0,
+        help="paper_replication only: pad each batch to its own longest text instead "
+             "of to --max-length. Train batches group texts of similar length within "
+             "chunks of this many batches, keeping each batch's mix of sources; val "
+             "and test keep the CSV order. 0 = off (pad everything to --max-length)",
+    )
+    parser.add_argument(
+        "--layer-lr-decay", type=float, default=1.0,
+        help="paper_replication only: ELECTRA-style layer-wise learning-rate decay. "
+             "The task layers train at --learning-rate, each encoder layer below at "
+             "this factor times the rate of the one above (top layer: factor^2), the "
+             "embeddings lowest. 1 = one rate for everything",
+    )
+    parser.add_argument(
+        "--clipnorm", type=float, default=0.0,
+        help="paper_replication only: clip the global gradient norm to this value "
+             "(0 = no clipping)",
+    )
+    parser.add_argument(
+        "--no-decay-bias-norm", action="store_true",
+        help="paper_replication only: no weight decay on biases and LayerNorm weights",
+    )
+    parser.add_argument(
         "--self-distill", action="store_true",
         help="Per-task stopping with self-distillation on the plain pooled loss: once "
              "an output's val F1 has stalled --self-distill-patience epochs, its loss "
@@ -3981,6 +4782,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--self-distill-signal", default="f1", choices=list(SELF_DISTILL_SIGNALS),
         help="Per-output val signal for --self-distill switching: F1 (default) or the "
              "output's own class-weighted val loss",
+    )
+    parser.add_argument(
+        "--stage2", action="store_true",
+        help="paper_replication only: after training, freeze the encoder, shared layers and "
+             "task-type blocks, cache their outputs and re-train each task's own block on "
+             "the real labels, keeping each output's own val-F1-best epoch (stage 1's block "
+             "= epoch 0). Needs --early-stop-metric",
+    )
+    parser.add_argument(
+        "--stage2-lrs", default="1e-4,3e-5",
+        help="Comma-separated stage-2 learning rates; each starts from the same stage 1",
+    )
+    parser.add_argument(
+        "--stage2-epochs", type=int, default=10, help="Stage-2 epochs per learning rate",
+    )
+    parser.add_argument(
+        "--stage2-batch-size", type=int, default=0,
+        help="Stage-2 batch size (default 0: the same as --batch-size)",
+    )
+    parser.add_argument(
+        "--stage2-save-weights", action="store_true",
+        help="Also write the stage-1 weights next to --results-json",
     )
     parser.add_argument(
         "--main-task", default="", choices=["", *PAPER_TABLE3_MULTITASK_F1],

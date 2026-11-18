@@ -21,7 +21,7 @@ REPO = "/root/repo"
 # PyTorch checkpoint (`from_pt=True`), never to train, and a CUDA torch build
 # alongside CUDA TensorFlow invites cuDNN version conflicts.
 
-image = (
+_base_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")
     .pip_install(
@@ -57,35 +57,59 @@ image = (
             "TF_USE_LEGACY_KERAS": "1",
         }
     )
-    # Ship this module itself into the container. Modal auto-includes only the
-    # module holding the App (modal_app.py / modal_replicate.py); a sibling
-    # module they import is NOT included, and the copy landing under /root/repo
-    # below is not on sys.path. Without this the container dies at import with
-    # ModuleNotFoundError and Modal retries it — a crash loop, not a clean fail.
-    .add_local_python_source("modal_common")
-    # Mount the repo at runtime. Nothing here is baked into the image, so
-    # editing local files takes effect on the next `modal run`.
-    .add_local_dir(
-        ".",
-        remote_path=REPO,
-        ignore=[
-            "**/.git/**",
-            "**/__pycache__/**",
-            "**/*.pyc",
-            "**/.venv/**",
-            "**/htmlcov/**",
-            "**/.pytest_cache/**",
-            "data/**",  # data arrives via the volume, not the mount
-            "**/multitask_data/**",
-        ],
-    )
 )
+
+
+def _with_repo(base: modal.Image) -> modal.Image:
+    """`base` plus the local code. These two steps must come last: Modal
+    rejects build steps added after a local mount."""
+    return (
+        base
+        # Ship this module itself into the container. Modal auto-includes only the
+        # module holding the App (modal_app.py / modal_replicate.py); a sibling
+        # module they import is NOT included, and the copy landing under /root/repo
+        # below is not on sys.path. Without this the container dies at import with
+        # ModuleNotFoundError and Modal retries it — a crash loop, not a clean fail.
+        .add_local_python_source("modal_common")
+        # Mount the repo at runtime. Nothing here is baked into the image, so
+        # editing local files takes effect on the next `modal run`.
+        .add_local_dir(
+            ".",
+            remote_path=REPO,
+            ignore=[
+                "**/.git/**",
+                "**/__pycache__/**",
+                "**/*.pyc",
+                "**/.venv/**",
+                "**/htmlcov/**",
+                "**/.pytest_cache/**",
+                "data/**",  # data arrives via the volume, not the mount
+                "**/multitask_data/**",
+                # API keys reach a container only as a Modal secret (see
+                # modal_embed.py), never as a copied file.
+                ".env",
+                "**/.env",
+            ],
+        )
+    )
+
+
+image = _with_repo(_base_image)
+
+# The same image plus the OpenAI client, for modal_embed.py only. It is a
+# separate layer on top of `_base_image`, so the training image above (and the
+# package versions every earlier run used) is not rebuilt.
+embed_image = _with_repo(_base_image.pip_install("openai>=2.0", "tiktoken>=0.7"))
 
 data_vol = modal.Volume.from_name("multitask-data", create_if_missing=True)
 cache_vol = modal.Volume.from_name("multitask-cache", create_if_missing=True)
 out_vol = modal.Volume.from_name("multitask-outputs", create_if_missing=True)
 
 VOLUMES = {"/data": data_vol, "/cache": cache_vol, "/outputs": out_vol}
+
+# Stored OpenAI embeddings (replication/openai_embeddings.py), on the cache
+# volume so they are paid for once and reused by every run.
+EMBEDDING_CACHE = "/cache/openai_embeddings"
 
 
 # Test files that run on purely synthetic data: no CSVs, no network, no model

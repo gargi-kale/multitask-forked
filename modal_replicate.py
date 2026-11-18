@@ -25,6 +25,8 @@ Prerequisites
    This function looks in `replication/` first, then `tests/`.
 
 No API key is needed: the encoder is the public `google/bert_uncased_L-2_H-128_A-2`.
+`--encoder openai-small` / `openai-large` trains on OpenAI embeddings stored
+beforehand by `modal_embed.py::embed`, the only function that uses a key.
 """
 
 import os
@@ -89,7 +91,9 @@ def smoke_tests_gpu(extra_args: str = "") -> int:
     image=image,
     volumes=VOLUMES,
     gpu=GPU,
-    timeout=60 * 60 * 6,
+    # 6 hours covers every small-BERT run; MULTITASK_TIMEOUT_H raises it for
+    # heavier encoders (Modal's limit is 24).
+    timeout=int(60 * 60 * float(os.environ.get("MULTITASK_TIMEOUT_H", "6"))),
     memory=32768,
 )
 def replicate(
@@ -151,6 +155,16 @@ def replicate(
     probe_untrained: bool = False,
     label_share: str = "",
     repeat_train: int = 1,
+    stage2: bool = False,
+    stage2_lrs: str = "1e-4,3e-5",
+    stage2_epochs: int = 10,
+    stage2_save_weights: bool = False,
+    stage2_batch_size: int = 0,
+    evals_per_epoch: int = 1,
+    length_chunk_batches: int = 0,
+    layer_lr_decay: float = 1.0,
+    clipnorm: float = 0.0,
+    no_decay_bias_norm: bool = False,
 ) -> int:
     """Run a replication experiment on a GPU.
 
@@ -159,6 +173,10 @@ def replicate(
     `max_length` defaults to the paper config's seq_length of 512. Metrics for
     `paper_replication` are written to the `multitask-outputs` volume as
     `<experiment>[_<tag>].json`.
+
+    `encoder` "openai-small" / "openai-large" trains on OpenAI embeddings
+    stored on the cache volume by `modal_embed.py::embed` (no encoder in the
+    model, so no masked-word or masked-copy options).
 
     Defaults match `configs/config_iac.yaml` and the script's
     PAPER_TRAINING_CONFIG (lr 3e-4, batch 256, dropout 0.4, weight decay 0.01,
@@ -221,6 +239,16 @@ def replicate(
     heads are pooled (`--propaganda-pool`; needs `pooled_loss` unless max), and
     `technique_loss_weight` > 0 adds that weight x the per-technique loss to
     the pooled term (`--technique-loss-weight`; needs `pooled_loss`).
+    `stage2` re-trains each task's own block on the frozen stage-1 model at
+    each rate in `stage2_lrs` for `stage2_epochs` epochs (`--stage2`; needs
+    `early_stop_metric`); `stage2_save_weights` also writes the stage-1 weights.
+    Fine-tuning options: `evals_per_epoch` scores that many times per epoch
+    (`--evals-per-epoch`; `early_stop_patience` then counts scorings),
+    `length_chunk_batches` > 0 pads each batch to its own longest text, with
+    train batches of similar length (`--length-chunk-batches`), `layer_lr_decay`
+    < 1 is ELECTRA-style layer-wise learning-rate decay, `clipnorm` > 0 clips
+    the global gradient norm, and `no_decay_bias_norm` leaves biases and
+    LayerNorm weights out of weight decay.
     """
     import tensorflow as tf
 
@@ -301,6 +329,17 @@ def replicate(
         *(["--probe-untrained"] if probe_untrained else []),
         *(["--label-share", label_share] if label_share else []),
         *(["--repeat-train", str(repeat_train)] if repeat_train > 1 else []),
+        *(["--stage2", "--stage2-lrs", stage2_lrs,
+           "--stage2-epochs", str(stage2_epochs)] if stage2 else []),
+        *(["--stage2-save-weights"] if stage2 and stage2_save_weights else []),
+        *(["--stage2-batch-size", str(stage2_batch_size)]
+          if stage2 and stage2_batch_size else []),
+        *(["--evals-per-epoch", str(evals_per_epoch)] if evals_per_epoch != 1 else []),
+        *(["--length-chunk-batches", str(length_chunk_batches)]
+          if length_chunk_batches else []),
+        *(["--layer-lr-decay", str(layer_lr_decay)] if layer_lr_decay != 1.0 else []),
+        *(["--clipnorm", str(clipnorm)] if clipnorm else []),
+        *(["--no-decay-bias-norm"] if no_decay_bias_norm else []),
         *(["--masked-label-weight", str(masked_label_weight)] if masked_label_weight else []),
         *(["--consistency-weight", str(consistency_weight)] if consistency_weight else []),
         *(["--mask-sweep", mask_sweep] if mask_sweep else []),
@@ -803,7 +842,14 @@ def masked_lm_tests(extra_args: str = "") -> int:
                       "replication/test_pooled_output_loss.py",
                       "replication/test_mask_news_labels.py",
                       "replication/test_hide_one_label.py",
-                      "replication/test_self_distill.py"])
+                      "replication/test_self_distill.py",
+                      "replication/test_stage2.py"])
+    return run(cmd + (extra_args.split() if extra_args else []))
+
+
+@app.function(image=image, volumes=VOLUMES, timeout=60 * 30, memory=8192)
+def stage2_tests(extra_args: str = "") -> int:
+    cmd = pytest_cmd(["replication/test_stage2.py"])
     return run(cmd + (extra_args.split() if extra_args else []))
 
 
@@ -2678,3 +2724,780 @@ def hide_one(tasks: str = "", seeds: str = "42,1,2", method: str = "plain"):
     _spawn_all([(f"{method}_hide_{t}_s{s}", replicate.spawn(
         **_hide_one_kwargs(method, s, f"{method}_hide_{t}_s{s}"),
         hide_task=t, probe_tasks="hidden")) for t, s in todo])
+
+
+# --------------------------------------------------------------------------
+# Frozen stage 2 (Nov 2026)
+# --------------------------------------------------------------------------
+# One model with a stopping point per task. Stage 1 is famo_consf1_m5 as in
+# `consistency_filter` (same settings as the saved RETUNE_FAMO_DIR runs and
+# the single-task runs in SINGLE_RETUNE_DIR). Stage 2 freezes the encoder, the
+# shared layers and the task-type blocks, caches their outputs, and re-trains
+# each task's own block on the real labels (no FAMO, no consistency term, no
+# masking) at each learning rate, keeping each output's own val-F1-best epoch
+# (stage 1's block = epoch 0). Both rates start from the same stage 1.
+#
+#     modal run modal_replicate.py::stage2_tests
+#     MULTITASK_GPU=H100,A100-80GB,L40S,L4 modal run --detach modal_replicate.py::stage2_runs --seeds 42 --smoke
+#     MULTITASK_GPU=H100,A100-80GB,L40S,L4 modal run --detach modal_replicate.py::stage2_runs
+#     modal run modal_replicate.py::stage2_report
+#
+# Writes /outputs/paper_replication_stage2/famo_consf1_m5_stage2[_smoke]_s<seed>.json,
+# its stage-1 predictions (.npz), one predictions file per stage-2 rate and
+# the stage-1 weights.
+
+STAGE2_DIR = "paper_replication_stage2"
+STAGE2_LRS = "1e-4,3e-5"
+
+
+def _stage2_name(seed: int, smoke: bool = False, encoder: str = "") -> str:
+    return ((f"{encoder}_" if encoder else "")
+            + f"{MAIN_TASK_BASE}_stage2{'_smoke' if smoke else ''}_s{seed}")
+
+
+@app.local_entrypoint()
+def stage2_runs(seeds: str = "42,1,2,3", lrs: str = STAGE2_LRS, epochs: int = 10,
+                smoke: bool = False, encoder: str = ""):
+    """--smoke: 2 stage-2 epochs, written under a separate name.
+    --encoder electra (a key of ENCODER_NAMES): that encoder at 256 tokens in
+    place of the small BERT at 512, as in `encoder_swap`; run names get the
+    encoder as a prefix."""
+    if encoder and encoder not in ENCODER_NAMES:
+        raise SystemExit(f"encoder: one of {list(ENCODER_NAMES)}")
+    encoder_kwargs = (dict(encoder=ENCODER_NAMES[encoder], max_length=ENCODER_MAX_LENGTH)
+                      if encoder else {})
+    weight, keep = CONSISTENCY_FILTER_CONFIGS[MAIN_TASK_BASE]
+    done = _done(STAGE2_DIR)
+    calls = []
+    for seed in (int(s) for s in seeds.split(",")):
+        name = _stage2_name(seed, smoke, encoder)
+        if name in done:
+            print(f"{name} already done, skipping", flush=True)
+            continue
+        calls.append((name, replicate.spawn(
+            seed=seed, pooled_loss=True, verbose=2, save_predictions=True,
+            loss_balancer="famo", mlm_lambda=0.0, mlm_mask_prob=0.05,
+            consistency_weight=weight, consistency_keep=keep,
+            early_stop_metric="f1", early_stop_patience=RETUNE_PATIENCE,
+            stage2=True, stage2_lrs=lrs, stage2_epochs=2 if smoke else epochs,
+            stage2_save_weights=not smoke,
+            tag=f"stage2/{name}", data_dir="/data/paper",
+            **{**WINNER, "learning_rate": RETUNE_FAMO_LR}, **encoder_kwargs,
+        )))
+    _spawn_all(calls)
+
+
+@app.local_entrypoint()
+def stage2_report(seeds: str = "42,1,2,3", smoke: bool = False, encoder: str = ""):
+    """Stage 2 against its own stage 1 and against single-task, test F1 over
+    the 10 outputs, paired by seed. The stage-2 learning rate is picked on
+    mean val F1 over the seeds; test plays no part in any choice.
+    --encoder electra reads the runs of `stage2_runs --encoder electra`; the
+    single-task columns are then still the small BERT at 512 tokens."""
+    import json
+    import statistics
+
+    from scipy import stats
+
+    def load(directory, name):
+        try:
+            return json.loads(b"".join(out_vol.read_file(f"{directory}/{name}.json")))
+        except Exception:
+            return None
+
+    def ci(d):
+        if len(d) < 2:
+            return f"{d[0]:+.1f} (n=1)" if d else "–"
+        m, se = statistics.mean(d), statistics.stdev(d) / len(d) ** 0.5
+        h = stats.t.ppf(0.975, len(d) - 1) * se
+        return f"{m:+.1f} [{m - h:+.1f}, {m + h:+.1f}]"
+
+    def mean(xs):
+        return statistics.mean(xs) if xs else float("nan")
+
+    runs = {}
+    for seed in (int(s) for s in seeds.split(",")):
+        d = load(STAGE2_DIR, _stage2_name(seed, smoke, encoder))
+        if d and d.get("stage2"):
+            runs[seed] = d
+        else:
+            print(f"{_stage2_name(seed, smoke, encoder)}: not finished")
+    if not runs:
+        raise SystemExit(f"No finished runs in {STAGE2_DIR}")
+    have = sorted(runs)
+    keys = list(TABLE3_LABELS)
+    lrs = list(next(iter(runs.values()))["stage2"]["runs"])
+
+    print(f"\nSeeds {have}. Checks per seed:")
+    for s in have:
+        d, s2 = runs[s], runs[s]["stage2"]
+        rec = d["epoch_scores"][d["best_epoch"] - 1]
+        saved = (load(ENCODER_DIR, f"{encoder}_{MAIN_TASK_BASE}_s{s}") if encoder
+                 else load(RETUNE_FAMO_DIR, f"{MAIN_TASK_BASE}_s{s}"))
+        saved_f1 = (f"{100 * saved['epoch_scores'][saved['best_epoch'] - 1]['test_f1']:.1f}"
+                    if saved else "–")
+        secs = [e["seconds"] for r in s2["runs"].values() for e in r["epochs"][1:]]
+        print(f"  s{s}: stage 1 kept epoch {d['best_epoch']} of {len(d['epoch_scores'])}, "
+              f"val/test F1 {100 * s2['stage1']['val_f1']:.1f} / {100 * s2['stage1']['test_f1']:.1f} "
+              f"(its epoch record {100 * rec['val_f1']:.1f} / {100 * rec['test_f1']:.1f}; saved "
+              f"{MAIN_TASK_BASE} run test {saved_f1}); frozen weights unchanged "
+              f"{s2['frozen_unchanged']}; assembled vs chosen-epoch F1 gap "
+              f"{max(r['assembly_max_f1_gap'] for r in s2['runs'].values()):.1e}; cache "
+              f"{s2['cache_seconds']:.0f}s; stage-2 epoch {mean(secs):.1f}s")
+
+    def f1(s, lr, split, k=None):
+        node = runs[s]["stage2"]["stage1"] if lr is None else runs[s]["stage2"]["runs"][lr]["assembled"]
+        return 100 * (node[split][k]["f1"] if k else node[f"{split}_f1"])
+
+    print("\nMean F1 x100 over the 10 outputs, mean over seeds (val / test):")
+    print(f"  {'stage 1':<16}{mean([f1(s, None, 'val') for s in have]):.2f} / "
+          f"{mean([f1(s, None, 'test') for s in have]):.2f}")
+    val_mean = {}
+    for lr in lrs:
+        val_mean[lr] = mean([f1(s, lr, "val") for s in have])
+        print(f"  {'stage 2 lr ' + lr:<16}{val_mean[lr]:.2f} / "
+              f"{mean([f1(s, lr, 'test') for s in have]):.2f}")
+    best = max(lrs, key=lambda lr: val_mean[lr])
+    print(f"Learning rate picked on mean val F1: {best}")
+
+    single = {}  # seed: {output: epoch record at its kept epoch}
+    for s in have:
+        recs = {}
+        for k in keys:
+            d = load(SINGLE_RETUNE_DIR, f"only_{k}_s{s}")
+            if d:
+                recs[k] = d["epoch_scores"][d["best_epoch"] - 1]
+        if len(recs) == len(keys):
+            single[s] = recs
+    both = [s for s in have if s in single]
+
+    def vt(v, t):
+        return f"{mean(v):.1f} / {mean(t):.1f}"
+
+    print(f"\nWeighted F1 x100 (library scoring, J cut-off tuned on val), stage 2 at lr {best}. "
+          "val / test are means over seeds; differences are test F1, paired by seed, "
+          "with 95% t intervals.")
+    head = (f"{'Task':<22}{'Paper (Table 3 F1)':>19}{'stage 1 val/test':>18}{'stage 2 val/test':>18}"
+            f"{'single val/test':>17}{'stage 2 - stage 1':>24}{'stage 2 - single':>24}"
+            f"{'  chosen epoch per seed'}")
+    print(head)
+    for k, (label, paper_f1) in TABLE3_LABELS.items():
+        d1 = [f1(s, best, "test", k) - f1(s, None, "test", k) for s in have]
+        ds = [f1(s, best, "test", k) - 100 * single[s][k]["test"][k]["f1"] for s in both]
+        sv = vt([100 * single[s][k]["val"][k]["f1"] for s in both],
+                [100 * single[s][k]["test"][k]["f1"] for s in both]) if both else "–"
+        epochs = ", ".join(str(runs[s]["stage2"]["runs"][best]["chosen_epoch"][k]) for s in have)
+        print(f"{label:<22}{paper_f1:>19.2f}"
+              f"{vt([f1(s, None, 'val', k) for s in have], [f1(s, None, 'test', k) for s in have]):>18}"
+              f"{vt([f1(s, best, 'val', k) for s in have], [f1(s, best, 'test', k) for s in have]):>18}"
+              f"{sv:>17}{ci(d1):>24}{ci(ds):>24}  {epochs}")
+
+    def single_mean(s, split):
+        return mean([100 * single[s][k][split][k]["f1"] for k in keys])
+
+    d1 = [f1(s, best, "test") - f1(s, None, "test") for s in have]
+    ds = [f1(s, best, "test") - single_mean(s, "test") for s in both]
+    d0 = [f1(s, None, "test") - single_mean(s, "test") for s in both]
+    paper_mean = statistics.mean(p for _, p in TABLE3_LABELS.values())
+    sv = vt([single_mean(s, "val") for s in both], [single_mean(s, "test") for s in both]) if both else "–"
+    print(f"{'Mean of 10':<22}{paper_mean:>19.2f}"
+          f"{vt([f1(s, None, 'val') for s in have], [f1(s, None, 'test') for s in have]):>18}"
+          f"{vt([f1(s, best, 'val') for s in have], [f1(s, best, 'test') for s in have]):>18}"
+          f"{sv:>17}{ci(d1):>24}{ci(ds):>24}")
+    print(f"\nPer seed, mean test F1 of 10: " + "; ".join(
+        f"s{s} stage 1 {f1(s, None, 'test'):.1f}, stage 2 {f1(s, best, 'test'):.1f}"
+        + (f", single {single_mean(s, 'test'):.1f}" if s in single else "") for s in have))
+    print(f"Stage 1 - single-task (same seeds): {ci(d0)}")
+    other = [lr for lr in lrs if lr != best]
+    for lr in other:
+        print(f"Not picked, lr {lr}: stage 2 - stage 1 "
+              f"{ci([f1(s, lr, 'test') - f1(s, None, 'test') for s in have])}; stage 2 - single "
+              f"{ci([f1(s, lr, 'test') - single_mean(s, 'test') for s in both])}")
+
+
+# --------------------------------------------------------------------------
+# Encoder swap: ELECTRA-small in place of the small BERT (Nov 2026)
+# --------------------------------------------------------------------------
+# Same data, heads, loss and re-tuned settings (WINNER, lr 1e-4, val-F1
+# stopping with patience 3) as `retune` / `consistency_filter`; only the
+# encoder changes: google/electra-small-discriminator (12 layers, hidden 256,
+# ~13.5M parameters) for google/bert_uncased_L-2_H-128_A-2 (2 layers, hidden
+# 128, 4.4M). Both use the same vocabulary, so the token ids are identical.
+#
+# Texts are cut at 256 tokens here, not 512: ELECTRA-small at 512 tokens x
+# batch 256 does not fit in GPU memory. About 2% of train rows are longer
+# than 256 tokens (7% of IAC rows, none of the others). The "bert" runs are
+# the small BERT re-run at 256 tokens on the same seeds, so the encoder
+# comparison is like for like; the 512-token BERT runs in RETUNE_DIR /
+# RETUNE_FAMO_DIR are shown for reference.
+#
+# Methods: plain (fixed task weights) and famo_consf1_m5. ELECTRA's
+# discriminator has no masked-word head; famo_consf1_m5 gives that loss
+# weight 0, so it needs none.
+#
+#     modal run modal_replicate.py::encoder_tests
+#     MULTITASK_GPU=A100-80GB,H100 modal run --detach modal_replicate.py::encoder_swap --encoders electra
+#     MULTITASK_GPU=L4 modal run --detach modal_replicate.py::encoder_swap --encoders bert
+#     modal run modal_replicate.py::encoder_swap_report
+#
+# `--lr` runs another learning rate (name suffix _lr<lr>), to check that the
+# rate tuned for the small BERT is not holding ELECTRA back.
+# Writes /outputs/paper_replication_encoder/<encoder>_<method>[_lr<lr>]_s<seed>.json (+ .npz).
+
+ENCODER_DIR = "paper_replication_encoder"
+ENCODER_MAX_LENGTH = 256
+# electra2 / electra4 / electra6 = ELECTRA-small cut to its first 2 / 4 / 6 of
+# 12 layers (~5.6M / 7.2M / 8.7M parameters; small BERT ~4.4M, full ~13.5M).
+ENCODER_NAMES = {"bert": "small-bert", "electra": "electra-small",
+                 "electra2": "electra-small-L2", "electra4": "electra-small-L4",
+                 "electra6": "electra-small-L6"}
+ENCODER_SHORT = ("electra2", "electra4", "electra6")
+ENCODER_METHODS = {"plain": {}, "famo_consf1_m5": HIDE_ONE_METHODS["famo_consf1_m5"]}
+# The same methods with the small BERT at 512 tokens: (directory, run-name prefix).
+ENCODER_REFERENCE = {"plain": (RETUNE_DIR, "lr0.0001"),
+                     "famo_consf1_m5": (RETUNE_FAMO_DIR, "famo_consf1_m5")}
+
+
+@app.function(image=image, volumes=VOLUMES, timeout=60 * 30, memory=8192)
+def encoder_tests(extra_args: str = "") -> int:
+    cmd = pytest_cmd(["replication/test_electra_encoder.py",
+                      "replication/test_label_aware_masking.py",
+                      "replication/test_masked_lm_loss.py"])
+    return run(cmd + (extra_args.split() if extra_args else []))
+
+
+def _encoder_config_name(encoder: str, method: str, lr: float) -> str:
+    return f"{encoder}_{method}" + ("" if lr == RETUNE_FAMO_LR else f"_lr{lr:g}")
+
+
+@app.local_entrypoint()
+def encoder_swap(encoders: str = "electra,bert", methods: str = "plain,famo_consf1_m5",
+                 seeds: str = "42,1,2,3", lr: float = RETUNE_FAMO_LR, epochs: int = 10,
+                 tag_dir: str = "encoder"):
+    """`tag_dir` other than "encoder" writes outside the results directory
+    (for a short timing run with `--epochs 1`)."""
+    jobs = [(e, m, int(s)) for e in encoders.split(",") for m in methods.split(",")
+            for s in seeds.split(",")]
+    bad = [j for j in jobs if j[0] not in ENCODER_NAMES or j[1] not in ENCODER_METHODS]
+    if bad:
+        raise SystemExit(f"encoders: {list(ENCODER_NAMES)}; methods: {list(ENCODER_METHODS)}")
+    done = _done(f"paper_replication_{tag_dir}")
+    name = lambda e, m, s: f"{_encoder_config_name(e, m, lr)}_s{s}"
+    todo = [j for j in jobs if name(*j) not in done]
+    print(f"{len(jobs)} runs requested, {len(jobs) - len(todo)} already done, "
+          f"launching {len(todo)}.", flush=True)
+    _spawn_all([(name(e, m, s), replicate.spawn(
+        seed=s, pooled_loss=True, verbose=2, save_predictions=True,
+        encoder=ENCODER_NAMES[e], max_length=ENCODER_MAX_LENGTH, epochs=epochs,
+        early_stop_metric="f1", early_stop_patience=RETUNE_PATIENCE,
+        tag=f"{tag_dir}/{name(e, m, s)}", data_dir="/data/paper",
+        **{**WINNER, "learning_rate": lr}, **ENCODER_METHODS[m])) for e, m, s in todo])
+
+
+@app.local_entrypoint()
+def encoder_swap_report(rule: str = "F1 p3"):
+    """ELECTRA-small against the small BERT, both at 256 tokens, paired by
+    seed, beside the 512-token BERT runs and the paper's Table 3."""
+    import json
+    import statistics
+
+    from scipy import stats
+
+    metric, patience = RETUNE_RULES[rule]
+
+    def load(directory, name):
+        d = json.loads(b"".join(out_vol.read_file(f"{directory}/{name}.json")))
+        rec = dict(_replay(d["epoch_scores"], metric, patience))
+        rec["epochs_run"] = len(d["epoch_scores"])
+        return rec
+
+    runs = {}  # config: {seed: picked epoch record}
+    for name in sorted(_done(ENCODER_DIR)):
+        config, seed = name.rsplit("_s", 1)
+        runs.setdefault(config, {})[int(seed)] = load(ENCODER_DIR, name)
+    if not runs:
+        raise SystemExit(f"No runs in {ENCODER_DIR}")
+    for method, (directory, prefix) in ENCODER_REFERENCE.items():
+        have = _done(directory)
+        ref = {s: load(directory, f"{prefix}_s{s}") for s in (42, 1, 2, 3)
+               if f"{prefix}_s{s}" in have}
+        if ref:
+            runs[f"bert512_{method}"] = ref
+
+    def ms(xs):
+        return (f"{statistics.mean(xs):.1f} ± {statistics.stdev(xs):.1f}" if len(xs) > 1
+                else f"{xs[0]:.1f}" if xs else "–")
+
+    def ci(d):
+        if len(d) < 2:
+            return f"{d[0]:+.1f} (n=1)" if d else "–"
+        m, se = statistics.mean(d), statistics.stdev(d) / len(d) ** 0.5
+        h = stats.t.ppf(0.975, len(d) - 1) * se
+        return f"{m:+.1f} [{m - h:+.1f}, {m + h:+.1f}]"
+
+    def paired(a, b, get):
+        if a not in runs or b not in runs:
+            return "–"
+        return ci([100 * (get(runs[a][s]) - get(runs[b][s]))
+                   for s in sorted(set(runs[a]) & set(runs[b]))])
+
+    order = sorted(runs, key=lambda c: (c.split("_", 1)[1], not c.startswith("bert512"),
+                                        not c.startswith("bert"), c))
+    print(f"\nEpoch picked by '{rule}' on val; mean over the 10 Table-3 outputs, x100, "
+          "mean ± sd over seeds. bert512_* = small BERT at 512 tokens (earlier runs); "
+          f"bert_* / electra*_* = {ENCODER_MAX_LENGTH} tokens; electra2/4/6 = first 2/4/6 "
+          "of ELECTRA-small's 12 layers. The paper does not say whether Table 3 is val "
+          "or test.")
+    print(f"{'config':<32}{'seeds':>12}{'epoch':>7}{'run':>5}{'val F1':>13}{'test F1':>13}"
+          f"{'test AUC':>13}{'Paper (Table 3 F1)':>20}")
+    for c in order:
+        recs = [runs[c][s] for s in sorted(runs[c])]
+        print(f"{c:<32}{','.join(str(s) for s in sorted(runs[c])):>12}"
+              f"{statistics.mean(r['epoch'] for r in recs):>7.1f}"
+              f"{statistics.mean(r['epochs_run'] for r in recs):>5.1f}"
+              f"{ms([100 * r['val_f1'] for r in recs]):>13}"
+              f"{ms([100 * r['test_f1'] for r in recs]):>13}"
+              f"{ms([100 * r['test_auc'] for r in recs]):>13}{PAPER_TABLE3_MEAN:>20.2f}")
+
+    print("\nPaired by seed, 95% t interval (test, mean of 10 outputs, x100)")
+    print(f"{'comparison':<52}{'ΔF1':>22}{'ΔAUC':>22}{'Δ val F1':>22}")
+    pairs = []
+    for m in ENCODER_METHODS:
+        pairs.append((f"electra_{m}", f"bert_{m}"))
+        pairs.append((f"bert_{m}", f"bert512_{m}"))
+        for e in ENCODER_SHORT:
+            pairs.append((f"{e}_{m}", f"bert_{m}"))
+            pairs.append((f"{e}_{m}", f"electra_{m}"))
+    pairs.append(("electra_famo_consf1_m5", "electra_plain"))
+    pairs.append(("bert_famo_consf1_m5", "bert_plain"))
+    pairs += [(c, c.rsplit("_lr", 1)[0]) for c in order if "_lr" in c]
+    for a, b in pairs:
+        if a in runs and b in runs:
+            print(f"{a + ' - ' + b:<52}{paired(a, b, lambda r: r['test_f1']):>22}"
+                  f"{paired(a, b, lambda r: r['test_auc']):>22}"
+                  f"{paired(a, b, lambda r: r['val_f1']):>22}")
+
+    for split in ("test", "val"):
+        print(f"\n{split.capitalize()} weighted F1 per task, x100, mean ± sd over seeds")
+        print(f"{'Task':<24}{'Paper (Table 3 F1)':>20}" + "".join(f"{c:>26}" for c in order))
+        for key, (label, paper_f1) in TABLE3_LABELS.items():
+            print(f"{label:<24}{paper_f1:>20.2f}" + "".join(
+                f"{ms([100 * r[split][key]['f1'] for r in runs[c].values()]):>26}" for c in order))
+        print(f"{'Mean of 10':<24}{PAPER_TABLE3_MEAN:>20.2f}" + "".join(
+            f"{ms([100 * r[f'{split}_f1'] for r in runs[c].values()]):>26}" for c in order))
+
+    print("\nTest AUC per task, x100 (the paper reports no AUC)")
+    print(f"{'Task':<24}{'Paper':>20}" + "".join(f"{c:>26}" for c in order))
+    for key, (label, _) in TABLE3_LABELS.items():
+        print(f"{label:<24}{'n/a':>20}" + "".join(
+            f"{ms([100 * r['test'][key]['auc'] for r in runs[c].values()]):>26}" for c in order))
+
+    for e in ("electra",) + ENCODER_SHORT:
+        if not any(f"{e}_{m}" in runs for m in ENCODER_METHODS):
+            continue
+        print(f"\n{e} - bert per task (256 tokens), test F1 x100, paired by seed")
+        print(f"{'Task':<24}" + "".join(f"{m:>26}" for m in ENCODER_METHODS))
+        for key, (label, _) in TABLE3_LABELS.items():
+            print(f"{label:<24}" + "".join(
+                f"{paired(f'{e}_{m}', f'bert_{m}', lambda r: r['test'][key]['f1']):>26}"
+                for m in ENCODER_METHODS))
+
+
+# --------------------------------------------------------------------------
+# OpenAI embeddings as the encoder: every text's embedding comes from OpenAI's
+# API (text-embedding-3-small / -large), is stored once on the cache volume by
+# `modal_embed.py::embed`, and the shared and task layers train on the stored
+# vectors. Nothing below the shared layers trains, so this is a frozen-encoder
+# setup; each method is compared with the same method on the fine-tuned small
+# BERT (lr 1e-4, 512 tokens) from `retune` / `retune_famo`, same seeds and
+# stopping rule.
+#
+# Methods: plain (fixed task weights) and famo (FAMO task weighting only, no
+# masking). famo_consf1_m5 and every masked-word method need tokens to mask,
+# and the API returns one vector per text.
+#
+#     modal run modal_embed.py::embed --estimate-only   # tokens and cost, no API call
+#     modal run --detach modal_embed.py::embed          # embed and store (needs the openai-api secret)
+#     modal run --detach modal_replicate.py::openai_embeddings --seeds 42
+#     modal run modal_replicate.py::openai_embeddings_report
+#
+# The epoch cap is 30, not 10: with fixed inputs an epoch is a pass of small
+# dense layers, and the layers start from scratch on inputs they have never
+# seen. The stopping rule is unchanged (val F1, patience 3).
+# Writes /outputs/paper_replication_openai/<encoder>_<method>_lr<lr>_s<seed>.json (+ .npz).
+
+OPENAI_DIR = "paper_replication_openai"
+OPENAI_ENCODERS = ("openai-small", "openai-large")
+OPENAI_EPOCHS = 30
+OPENAI_METHODS = {"plain": {}, "famo": {"loss_balancer": "famo"}}
+# The same methods on the fine-tuned small BERT: (directory, run-name prefix).
+OPENAI_REFERENCE = {"plain": (RETUNE_DIR, "lr0.0001"), "famo": (RETUNE_FAMO_DIR, "famo")}
+
+
+@app.local_entrypoint()
+def openai_embeddings(encoders: str = "openai-small", methods: str = "plain,famo",
+                      seeds: str = "42", lrs: str = "1e-4", epochs: int = OPENAI_EPOCHS):
+    jobs = [(e, m, float(lr), int(s)) for e in encoders.split(",") for m in methods.split(",")
+            for lr in lrs.split(",") for s in seeds.split(",")]
+    if any(e not in OPENAI_ENCODERS or m not in OPENAI_METHODS for e, m, _, _ in jobs):
+        raise SystemExit(f"encoders: {list(OPENAI_ENCODERS)}; methods: {list(OPENAI_METHODS)}")
+    done = _done(OPENAI_DIR)
+    name = lambda e, m, lr, s: f"{e}_{m}_lr{lr:g}_s{s}"
+    todo = [j for j in jobs if name(*j) not in done]
+    print(f"{len(jobs)} runs requested, {len(jobs) - len(todo)} already done, "
+          f"launching {len(todo)}.", flush=True)
+    _spawn_all([(name(e, m, lr, s), replicate.spawn(
+        seed=s, pooled_loss=True, verbose=2, save_predictions=True,
+        encoder=e, epochs=epochs,
+        early_stop_metric="f1", early_stop_patience=RETUNE_PATIENCE,
+        tag=f"openai/{name(e, m, lr, s)}", data_dir="/data/paper",
+        **{**WINNER, "learning_rate": lr}, **OPENAI_METHODS[m])) for e, m, lr, s in todo])
+
+
+@app.local_entrypoint()
+def openai_embeddings_report(rule: str = "F1 p3"):
+    """The OpenAI-embedding runs beside the same methods on the fine-tuned
+    small BERT (lr 1e-4, 512 tokens), same seeds, and the paper's Table 3."""
+    import json
+    import statistics
+
+    metric, patience = RETUNE_RULES[rule]
+
+    def load(directory, name):
+        d = json.loads(b"".join(out_vol.read_file(f"{directory}/{name}.json")))
+        rec = dict(_replay(d["epoch_scores"], metric, patience))
+        rec["epochs_run"] = len(d["epoch_scores"])
+        rec["epoch_cap"] = int(d["args"]["epochs"])
+        return rec
+
+    runs = {}  # config: {seed: picked epoch record}
+    for name in sorted(_done(OPENAI_DIR)):
+        config, seed = name.rsplit("_s", 1)
+        runs.setdefault(config, {})[int(seed)] = load(OPENAI_DIR, name)
+    if not runs:
+        raise SystemExit(f"No runs in {OPENAI_DIR}")
+    seeds = sorted({s for r in runs.values() for s in r})
+    order = sorted(runs)
+    for method, (directory, prefix) in OPENAI_REFERENCE.items():
+        have = _done(directory)
+        ref = {s: load(directory, f"{prefix}_s{s}") for s in seeds if f"{prefix}_s{s}" in have}
+        if ref and any(f"_{method}_lr" in c for c in order):
+            runs[f"bert512_{method} (fine-tuned)"] = ref
+            order.append(f"bert512_{method} (fine-tuned)")
+
+    def ms(xs):
+        return (f"{statistics.mean(xs):.1f} ± {statistics.stdev(xs):.1f}" if len(xs) > 1
+                else f"{xs[0]:.1f}")
+
+    width = max(len(c) for c in order) + 2
+    print(f"\nMean over the 10 Table-3 outputs, x100; epoch picked on val by {rule}, test "
+          f"read at that epoch; seeds {seeds}. The paper does not say whether Table 3 is "
+          "val or test.")
+    print(f"{'config':<{width}}{'n':>3}{'epoch':>7}{'run':>5}{'cap':>5}{'val F1':>13}"
+          f"{'test F1':>13}{'test AUC':>13}{'Paper (Table 3 F1)':>20}")
+    for c in order:
+        recs = list(runs[c].values())
+        print(f"{c:<{width}}{len(recs):>3}{statistics.mean(r['epoch'] for r in recs):>7.1f}"
+              f"{statistics.mean(r['epochs_run'] for r in recs):>5.0f}"
+              f"{statistics.mean(r['epoch_cap'] for r in recs):>5.0f}"
+              f"{ms([100 * r['val_f1'] for r in recs]):>13}"
+              f"{ms([100 * r['test_f1'] for r in recs]):>13}"
+              f"{ms([100 * r['test_auc'] for r in recs]):>13}{PAPER_TABLE3_MEAN:>20.2f}")
+    capped = [c for c in order if any(r["epoch"] == r["epoch_cap"] for r in runs[c].values())]
+    if capped:
+        print(f"Still improving at the epoch cap (raise --epochs): {capped}")
+
+    for split, what in (("test", "f1"), ("val", "f1"), ("test", "auc")):
+        paper = "the paper reports no AUC" if what == "auc" else "weighted F1"
+        print(f"\n{split.capitalize()} {what.upper()} per task, x100 ({paper})")
+        # The paper's column is F1, so it is left blank beside AUC.
+        cell = lambda v: f"{v:>20.2f}" if what == "f1" else f"{'n/a':>20}"
+        print(f"{'Task':<24}{'Paper (Table 3 F1)':>20}" + "".join(f"{c:>{width + 2}}" for c in order))
+        for key, (label, paper_f1) in TABLE3_LABELS.items():
+            print(f"{label:<24}{cell(paper_f1)}" + "".join(
+                f"{ms([100 * r[split][key][what] for r in runs[c].values()]):>{width + 2}}"
+                for c in order))
+        print(f"{'Mean of 10':<24}{cell(PAPER_TABLE3_MEAN)}" + "".join(
+            f"{ms([100 * r[f'{split}_{what}'] for r in runs[c].values()]):>{width + 2}}"
+            for c in order))
+
+
+# --------------------------------------------------------------------------
+# Fine-tuning recipe on ELECTRA-small (16 Nov 2026)
+# --------------------------------------------------------------------------
+# Does standard fine-tuning practice improve the best setup (famo_consf1_m5 on
+# the full ELECTRA-small, 256 tokens)? Two arms, both with batches of similar
+# length padded to their own longest text (`length_chunk_batches`):
+#
+#   ref     the current recipe: lr 1e-4, batch 256, one rate for every weight,
+#           10-epoch schedule, scored once per epoch, patience 3 epochs.
+#   recipe  ELECTRA's layer-wise learning-rate decay (0.8), batch 64, a 4-epoch
+#           schedule scored 4 times per epoch (patience 6 scorings), global
+#           gradient clipping at 1, no weight decay on biases and LayerNorm.
+#           `--lrs` screens the top learning rate.
+#
+#     modal run modal_replicate.py::finetune_tests
+#     MULTITASK_GPU=H100,A100-80GB modal run --detach modal_replicate.py::finetune_recipe --arm ref --seeds 42,1
+#     MULTITASK_GPU=L4 modal run --detach modal_replicate.py::finetune_recipe --arm recipe --seeds 42 --lrs 1e-4,2e-4,3e-4
+#     modal run modal_replicate.py::finetune_recipe_report
+#
+# Writes /outputs/paper_replication_finetune/{ref,recipe_lr<lr>}_s<seed>.json (+ .npz).
+
+FINETUNE_DIR = "paper_replication_finetune"
+FINETUNE_CHUNK = 8  # batches per chunk for the length grouping
+FINETUNE_RECIPE = {"batch_size": 64, "epochs": 4, "evals_per_epoch": 4,
+                   "early_stop_patience": 6, "layer_lr_decay": 0.8, "clipnorm": 1.0,
+                   "no_decay_bias_norm": True}
+
+
+@app.function(image=image, volumes=VOLUMES, timeout=60 * 40, memory=8192)
+def finetune_tests(extra_args: str = "", new_only: bool = False) -> int:
+    cmd = pytest_cmd(["replication/test_finetune_recipe.py"] + ([] if new_only else [
+        "replication/test_epoch_scorer.py", "replication/test_stratify_batches.py",
+        "replication/test_electra_encoder.py"]))
+    return run(cmd + (extra_args.split() if extra_args else []))
+
+
+def _finetune_name(arm: str, lr: float, seed: int, stage2: bool = False, hide: str = "") -> str:
+    return (f"ref" if arm == "ref" else f"recipe_lr{lr:g}") + ("_stage2" if stage2 else "") \
+        + (f"_hide_{hide}" if hide else "") + f"_s{seed}"
+
+
+@app.local_entrypoint()
+def finetune_recipe(arm: str = "recipe", seeds: str = "42", lrs: str = "1e-4,2e-4,3e-4",
+                    epochs: int = 0, tag_dir: str = "finetune", stage2: bool = False,
+                    hide: str = ""):
+    """`epochs` > 0 overrides the arm's epoch count; with a `tag_dir` other
+    than "finetune" that gives a short timing run outside the results.
+    --stage2: after training, the frozen stage 2 of `stage2_runs` (same rates,
+    10 epochs, batches of 256) on the kept scoring; the run is named
+    `<config>_stage2_s<seed>` and also writes the stage-1 weights.
+    --hide a,b,...: one run per output, that output's labels removed from every
+    train row (`--hide-task`), plus a linear probe for it; named
+    `<config>[_stage2]_hide_<output>_s<seed>`. Report: `finetune_hide_report`."""
+    if arm not in ("ref", "recipe"):
+        raise SystemExit("arm: ref or recipe")
+    rates = [RETUNE_FAMO_LR] if arm == "ref" else [float(x) for x in lrs.split(",")]
+    hidden = [t for t in hide.split(",") if t] or [""]
+    unknown = [t for t in hidden if t and t not in TABLE3_LABELS]
+    if unknown:
+        raise SystemExit(f"--hide: not Table-3 outputs: {unknown}")
+    jobs = [(lr, int(s), t) for lr in rates for s in seeds.split(",") for t in hidden]
+    done = _done(f"paper_replication_{tag_dir}")
+    todo = [(lr, s, t) for lr, s, t in jobs
+            if _finetune_name(arm, lr, s, stage2, t) not in done]
+    print(f"{len(jobs)} runs requested, {len(jobs) - len(todo)} already done, "
+          f"launching {len(todo)}.", flush=True)
+    calls = []
+    for lr, s, t in todo:
+        kw = {**WINNER, "learning_rate": lr, "epochs": 10,
+              "early_stop_patience": RETUNE_PATIENCE}
+        if arm == "recipe":
+            kw.update(FINETUNE_RECIPE)
+        if epochs:
+            kw["epochs"] = epochs
+        if stage2:
+            kw.update(stage2=True, stage2_lrs=STAGE2_LRS, stage2_epochs=10,
+                      stage2_batch_size=WINNER["batch_size"], stage2_save_weights=True)
+        if t:
+            kw.update(hide_task=t, probe_tasks="hidden")
+        name = _finetune_name(arm, lr, s, stage2, t)
+        calls.append((name, replicate.spawn(
+            seed=s, pooled_loss=True, verbose=2, save_predictions=True,
+            encoder=ENCODER_NAMES["electra"], max_length=ENCODER_MAX_LENGTH,
+            early_stop_metric="f1", length_chunk_batches=FINETUNE_CHUNK,
+            tag=f"{tag_dir}/{name}", data_dir="/data/paper",
+            **kw, **ENCODER_METHODS["famo_consf1_m5"])))
+    _spawn_all(calls)
+
+
+@app.local_entrypoint()
+def finetune_recipe_report(tag_dir: str = "finetune"):
+    """Every run at the scoring the run itself kept (best val F1), beside the
+    earlier ELECTRA famo_consf1_m5 run padded to 256 tokens and the paper."""
+    import json
+    import statistics
+
+    def load(directory, name):
+        d = json.loads(b"".join(out_vol.read_file(f"{directory}/{name}.json")))
+        recs = d["epoch_scores"]
+        best = max(range(len(recs)), key=lambda i: (recs[i]["val_f1"], -i))
+        return {**recs[best], "scorings": len(recs), "last": recs[-1]["epoch"],
+                "curve": [(r["epoch"], r["val_f1"], r["test_f1"]) for r in recs],
+                "stage2": d.get("stage2")}
+
+    directory = f"paper_replication_{tag_dir}"
+    runs = {}  # config: {seed: kept record}
+    for name in sorted(_done(directory)):
+        if "_hide_" in name:  # see finetune_hide_report
+            continue
+        config, seed = name.rsplit("_s", 1)
+        runs.setdefault(config, {})[int(seed)] = load(directory, name)
+    if not runs:
+        raise SystemExit(f"No runs in {directory}")
+    old = f"electra_{MAIN_TASK_BASE}"
+    have = _done(ENCODER_DIR)
+    earlier = {s: load(ENCODER_DIR, f"{old}_s{s}") for s in (42, 1, 2, 3)
+               if f"{old}_s{s}" in have}
+    if earlier:
+        runs["earlier run, padded to 256"] = earlier
+
+    def ms(xs):
+        return (f"{statistics.mean(xs):.1f} ± {statistics.stdev(xs):.1f}" if len(xs) > 1
+                else f"{xs[0]:.1f}")
+
+    width = max(len(c) for c in runs) + 2
+    print("\nFull ELECTRA-small, famo_consf1_m5, 256 tokens. Mean of the 10 Table-3 outputs, "
+          "x100, at the scoring with the best val F1. The paper does not say whether "
+          "Table 3 is val or test.")
+    print(f"{'config':<{width}}{'seeds':>8}{'kept at epoch':>15}{'ran to':>8}{'scorings':>10}"
+          f"{'val F1':>13}{'test F1':>13}{'test AUC':>13}{'Paper (Table 3 F1)':>20}")
+    for c, by_seed in runs.items():
+        recs = [by_seed[s] for s in sorted(by_seed)]
+        print(f"{c:<{width}}{','.join(str(s) for s in sorted(by_seed)):>8}"
+              f"{statistics.mean(r['epoch'] for r in recs):>15.2f}"
+              f"{statistics.mean(r['last'] for r in recs):>8.2f}"
+              f"{statistics.mean(r['scorings'] for r in recs):>10.1f}"
+              f"{ms([100 * r['val_f1'] for r in recs]):>13}"
+              f"{ms([100 * r['test_f1'] for r in recs]):>13}"
+              f"{ms([100 * r['test_auc'] for r in recs]):>13}{PAPER_TABLE3_MEAN:>20.2f}")
+
+    print("\nPer run (val F1 / test F1 / test AUC at the kept scoring)")
+    for c, by_seed in runs.items():
+        for s in sorted(by_seed):
+            r = by_seed[s]
+            print(f"  {c + ' s' + str(s):<{width + 6}} epoch {r['epoch']:<5g} "
+                  f"{100 * r['val_f1']:.1f} / {100 * r['test_f1']:.1f} / {100 * r['test_auc']:.1f}"
+                  f"   val F1 by scoring: "
+                  + " ".join(f"{100 * v:.1f}" for _, v, _ in r["curve"]))
+
+    for split in ("test", "val"):
+        print(f"\n{split.capitalize()} weighted F1 per task, x100, mean ± sd over seeds")
+        print(f"{'Task':<24}{'Paper (Table 3 F1)':>20}" + "".join(f"{c:>{width + 2}}" for c in runs))
+        for key, (label, paper_f1) in TABLE3_LABELS.items():
+            print(f"{label:<24}{paper_f1:>20.2f}" + "".join(
+                f"{ms([100 * r[split][key]['f1'] for r in runs[c].values()]):>{width + 2}}"
+                for c in runs))
+        print(f"{'Mean of 10':<24}{PAPER_TABLE3_MEAN:>20.2f}" + "".join(
+            f"{ms([100 * r[f'{split}_f1'] for r in runs[c].values()]):>{width + 2}}"
+            for c in runs))
+
+    # Frozen stage 2 (runs launched with --stage2): the task blocks re-trained
+    # on the kept scoring's frozen model, each output at its own best epoch.
+    for c, by_seed in runs.items():
+        for seed in sorted(by_seed):
+            s2 = by_seed[seed].get("stage2")
+            if not s2:
+                continue
+            st1 = s2["stage1"]
+            print(f"\nFrozen stage 2 on {c} s{seed}: frozen weights unchanged "
+                  f"{s2['frozen_unchanged']}; cached vs full-model score gap "
+                  f"{s2['cache_max_abs_gap']:.1e}; stage-2 batch {s2['batch_size']}")
+            print(f"  {'stage 1':<18} val F1 {100 * st1['val_f1']:.1f}  test F1 "
+                  f"{100 * st1['test_f1']:.1f}  test AUC {100 * st1['test_auc']:.1f}")
+            for lr, run in s2["runs"].items():
+                a = run["assembled"]
+                print(f"  {'stage 2 lr ' + lr:<18} val F1 {100 * a['val_f1']:.1f}  test F1 "
+                      f"{100 * a['test_f1']:.1f}  test AUC {100 * a['test_auc']:.1f}")
+            best = max(s2["runs"], key=lambda lr: s2["runs"][lr]["assembled"]["val_f1"])
+            a = s2["runs"][best]["assembled"]
+            print(f"  Stage-2 learning rate picked on val F1: {best}. Per task, val / test F1 x100:")
+            print(f"  {'Task':<24}{'Paper (Table 3 F1)':>20}{'stage 1':>16}{'stage 2':>16}"
+                  f"{'test change':>13}{'kept stage-2 epoch':>20}")
+            for key, (label, paper_f1) in TABLE3_LABELS.items():
+                v1, t1 = 100 * st1["val"][key]["f1"], 100 * st1["test"][key]["f1"]
+                v2, t2 = 100 * a["val"][key]["f1"], 100 * a["test"][key]["f1"]
+                print(f"  {label:<24}{paper_f1:>20.2f}{f'{v1:.1f} / {t1:.1f}':>16}"
+                      f"{f'{v2:.1f} / {t2:.1f}':>16}{t2 - t1:>+13.1f}"
+                      f"{s2['runs'][best]['chosen_epoch'][key]:>20}")
+            v1, t1, v2, t2 = (100 * x for x in (st1["val_f1"], st1["test_f1"],
+                                                a["val_f1"], a["test_f1"]))
+            print(f"  {'Mean of 10':<24}{PAPER_TABLE3_MEAN:>20.2f}{f'{v1:.1f} / {t1:.1f}':>16}"
+                  f"{f'{v2:.1f} / {t2:.1f}':>16}{t2 - t1:>+13.1f}")
+
+
+@app.local_entrypoint()
+def finetune_hide_report(reference: str = "recipe_lr0.0002_stage2", seed: int = 42,
+                         tag_dir: str = "finetune"):
+    """Each `<reference>_hide_<output>_s<seed>` run against `<reference>_s<seed>`
+    (every label seen): the other outputs' test F1 / AUC, at stage 1 (the kept
+    scoring) and after frozen stage 2 (rate picked on val F1), plus the
+    hidden output's probe beside the reference model's trained output."""
+    import json
+    import statistics
+
+    directory = f"paper_replication_{tag_dir}"
+
+    def load(name):
+        return json.loads(b"".join(out_vol.read_file(f"{directory}/{name}.json")))
+
+    def stages(d):
+        """{'stage 1': node, 'stage 2': node}, node = {'val'/'test': {output: {f1, auc}}}."""
+        recs = d["epoch_scores"]
+        kept = max(range(len(recs)), key=lambda i: (recs[i]["val_f1"], -i))
+        out = {"stage 1": recs[kept]}
+        s2 = d.get("stage2")
+        if s2:
+            best = max(s2["runs"], key=lambda lr: s2["runs"][lr]["assembled"]["val_f1"])
+            out["stage 2"] = s2["runs"][best]["assembled"]
+        return out
+
+    ref_name = f"{reference}_s{seed}"
+    ref = stages(load(ref_name))
+    prefix, suffix = f"{reference}_hide_", f"_s{seed}"
+    names = sorted(n for n in _done(directory) if n.startswith(prefix) and n.endswith(suffix))
+    if not names:
+        raise SystemExit(f"No {prefix}*{suffix} runs in {directory}")
+    hides = {n[len(prefix):-len(suffix)]: load(n) for n in names}
+    print(f"\nReference: {ref_name}. Seed {seed}, one run each, so differences under "
+          "about 1 point may be noise. x100.")
+
+    for stage in ref:
+        print(f"\n{stage}: mean over the 9 other outputs, hidden-label run vs reference "
+              "(val F1 / test F1 / test AUC)")
+        print(f"{'Hidden label':<24}{'Paper (Table 3 F1)':>20}{'reference':>22}{'label hidden':>22}"
+              f"{'test F1 change':>16}{'test AUC change':>17}")
+        changes = []
+        for t, d in hides.items():
+            node = stages(d).get(stage)
+            if node is None:
+                continue
+            others = [k for k in TABLE3_LABELS if k != t]
+            m = lambda n, split, metric: 100 * statistics.mean(n[split][k][metric] for k in others)
+            r = (m(ref[stage], "val", "f1"), m(ref[stage], "test", "f1"), m(ref[stage], "test", "auc"))
+            h = (m(node, "val", "f1"), m(node, "test", "f1"), m(node, "test", "auc"))
+            changes.append(h[1] - r[1])
+            paper = statistics.mean(TABLE3_LABELS[k][1] for k in others)
+            print(f"{TABLE3_LABELS[t][0]:<24}{paper:>20.2f}"
+                  f"{'%.1f / %.1f / %.1f' % r:>22}{'%.1f / %.1f / %.1f' % h:>22}"
+                  f"{h[1] - r[1]:>+16.1f}{h[2] - r[2]:>+17.1f}")
+        if changes:
+            print(f"{'Mean change':<24}{'':>64}{statistics.mean(changes):>+16.1f}")
+
+        print(f"\n{stage}: test F1 change of each other output (hidden run minus reference)")
+        print(f"{'Output':<24}{'Paper (Table 3 F1)':>20}{'reference':>11}"
+              + "".join(f"{'hide ' + TABLE3_LABELS[t][0][:14]:>22}" for t in hides))
+        for k, (label, paper_f1) in TABLE3_LABELS.items():
+            row = []
+            for t, d in hides.items():
+                node = stages(d).get(stage)
+                row.append("hidden" if k == t else "–" if node is None else
+                           f"{100 * (node['test'][k]['f1'] - ref[stage]['test'][k]['f1']):+.1f}")
+            print(f"{label:<24}{paper_f1:>20.2f}{100 * ref[stage]['test'][k]['f1']:>11.1f}"
+                  + "".join(f"{c:>22}" for c in row))
+
+    print("\nHidden label: linear probe on the hidden-label model (fitted on up to 20,000 of "
+          "its train labels) vs the reference model's trained output, test F1 / AUC")
+    for t, d in hides.items():
+        p = (d.get("probes") or {}).get(t, {})
+        probe = "  ".join(f"{rep} {100 * p[rep]['test']['f1']:.1f}/{100 * p[rep]['test']['auc']:.1f}"
+                          for rep in ("encoder", "shared", "group") if "test" in p.get(rep, {}))
+        r1 = ref["stage 1"]["test"][t]
+        r2 = ref.get("stage 2", ref["stage 1"])["test"][t]
+        print(f"  {TABLE3_LABELS[t][0]:<22} paper {TABLE3_LABELS[t][1]:.2f}; reference trained "
+              f"output {100 * r1['f1']:.1f}/{100 * r1['auc']:.1f} (stage 2 {100 * r2['f1']:.1f}/"
+              f"{100 * r2['auc']:.1f}); probe {probe or 'n/a'}")
+        s2 = d.get("stage2") or {}
+        print(f"    kept scoring {stages(d)['stage 1']['epoch']:g}; stage-2 checks: frozen "
+              f"unchanged {s2.get('frozen_unchanged')}, hidden block unchanged "
+              f"{s2.get('untrained_unchanged')}")

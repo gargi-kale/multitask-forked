@@ -123,6 +123,11 @@ class EncoderConfig:
     # from_dict so a saved model reloads with the same setting.
     from_pt: Optional[bool] = False
 
+    # Extra keyword arguments for the HuggingFace `from_pretrained` call that
+    # override the checkpoint's config, e.g. {"num_hidden_layers": 2} to keep
+    # only the first 2 transformer layers of a deeper pretrained encoder.
+    encoder_kwargs: Optional[Dict[str, Any]] = None
+
     def __post_init__(self):
         """Validate encoder configuration."""
         if self.encoder_input_type is not None and not isinstance(self.encoder_input_type, EncoderInputType):
@@ -161,6 +166,7 @@ class EncoderConfig:
             "trainable_encoder": self.trainable_encoder,
             "embedding_dim": self.embedding_dim,
             "from_pt": self.from_pt,
+            "encoder_kwargs": self.encoder_kwargs,
         }
 
     @classmethod
@@ -187,6 +193,7 @@ class EncoderConfig:
             embedding_dim=d.get("embedding_dim"),
             api_key=None,
             from_pt=d.get("from_pt", False),
+            encoder_kwargs=d.get("encoder_kwargs"),
         )
 
     def resolve_identifier(self, encoder_identifier: str) -> None:

@@ -239,17 +239,21 @@ class MultiTaskModel(tf.keras.Model):
                 # use_safetensors=False avoids a compatibility bug in transformers when
                 # loading TF models from .safetensors with safetensors>=0.5 (safe_open
                 # object is not iterable in load_pytorch_state_dict_in_tf2_model).
+                # Config overrides such as num_hidden_layers (see EncoderConfig.encoder_kwargs).
+                encoder_kwargs = dict(getattr(self.encoder_config, "encoder_kwargs", None) or {})
                 try:
                     try:
                         self.encoder = TFAutoModel.from_pretrained(
                             encoder_identifier, name='encoder',
-                            use_safetensors=False, from_pt=self.encoder_config.from_pt
+                            use_safetensors=False, from_pt=self.encoder_config.from_pt,
+                            **encoder_kwargs
                         )
                     except TypeError:
                         # Older transformers may not accept use_safetensors
                         self.encoder = TFAutoModel.from_pretrained(
                             encoder_identifier, name='encoder',
-                            from_pt=self.encoder_config.from_pt
+                            from_pt=self.encoder_config.from_pt,
+                            **encoder_kwargs
                         )
                 except OSError as e:
                     if not self.encoder_config.from_pt:
